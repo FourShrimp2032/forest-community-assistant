@@ -414,6 +414,7 @@ The deterministic tests need no network or credentials. They run on the real arc
 | retrieval and priority | `test_retrieval.py` |
 | routing, follow-ups, dialogue context, customer scenarios | `test_qa.py`, `test_scenarios.py`, `test_dialogue.py` |
 | answer checks and citations | `test_comparisons.py`, `test_citations.py`, `test_answer_polish.py` |
+| Telegram HTML payload: entities, bold, angle brackets | `test_rendering.py` |
 | replays of observed answer errors (fake model outputs) | `test_answer_accuracy.py` |
 | Groq client, fallbacks, rate limits, time budget | `test_llm.py`, `test_rate_limits.py` |
 
@@ -442,7 +443,7 @@ Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 | Telegram upload lifecycle across users: name collection, place clarification, replacement by another user, withdrawal, per-user lists, regional fallback, persistence after restart | ✅ | ✅ manual tests by the developer (logs corroborate replacements and withdrawals) |
 | Version ordering across Drive and Telegram (`modifiedTime` vs receipt time) | ✅ | — offline only |
 | Questions, follow-ups, context, comparisons, missing information | ✅ (fake LLM) | ✅ real models and manual Telegram tests; **full live suite not re-run after the latest answer-check changes** |
-| Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ✅ insulation and head/treasurer passed a manual retest; ⏳ ford retest pending after a further fix; replays do not establish live answer quality |
+| Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ✅ all three passed a manual retest (ford after a further fix); replays do not establish live answer quality |
 | Rate-limit fallback | ✅ | ✅ observed when a daily quota ran out |
 
 **Observed latency** (18 Oct, this machine and network, free-tier keys): 1.3–2.8 s per question when

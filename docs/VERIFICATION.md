@@ -14,9 +14,9 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, after the answer-error fixes and the ford retest fix in section 12): 271 tests
-  pass inside the Docker image (Tesseract included); locally 270 pass and 1 is skipped (the OCR test, which
-  needs Tesseract).
+- Latest run (18 Oct 2026, after the answer-error fixes, the ford retest fix and the formatting fix in
+  section 12): 289 tests pass inside the Docker image (Tesseract included); locally 288 pass and 1 is
+  skipped (the OCR test, which needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -277,4 +277,31 @@ what was deleted. The main fix is that the correct sentences are no longer delet
 «【n】» form, surviving fragment) and check the final answer: whole, starting with the prohibition, with the
 alternative and the priority explanation, local source cited. This replay fails without the citation fix.
 The expected answer («Ні. … тільки по греблі … Місцева заборона має пріоритет…») passes unchanged; the
-insulation and multi-part replays are unchanged. **Pending:** manual retest of the ford question.
+insulation and multi-part replays are unchanged.
+
+**Manual ford retest (developer, 18 Oct 2026, after deploying `fb9184e`): passed.** The answer was complete:
+the prohibition, crossing only via the dam, and the geographic priority. Log: answered by gpt-oss-120b
+directly, no correction call, no fallback. Remaining source-fidelity details in the model's wording (not
+addressed by code, to avoid a heuristic for one phrasing): the regional advice was restated without «вище
+греблі», and the guests' rule was widened to "everyone who is not a resident"; the answer was also longer
+than the concise local answer the question needs.
+
+**Formatting of that answer:** the copied final paragraph contained literal HTML entities and broken bold
+markers. The answer text is not logged and the stored conversation history keeps only its beginning, so
+the exact sent text is unknown and the cause is **not determined**. An offline check of the rendering
+path found that ordinary model text renders cleanly and that Telegram rejected nothing during the retest,
+but that two bot-side paths would show exactly these artefacts in Telegram: bold markers spanning a line
+break or left unpaired stay literal, and entities or tags written by the model itself («&quot;», «<b>»)
+are escaped again and displayed literally.
+
+**Formatting fix (presentation only).** Entities written by the model are decoded exactly once when the
+answer is parsed, before the checks (the offline payload test also showed «&#x2014;» being read by the
+number check as 2014 and its sentence deleted, the same class of problem as «【n】»); rendering then
+escapes the text for Telegram. Only `<b>`, `<strong>` and `<br>` are interpreted; other angle-bracket text
+stays ordinary text. Markdown and HTML bold are paired per line, and an unpaired marker is dropped.
+`tests/test_rendering.py` (18 tests) checks the payload passed to `send_message` with a strict model of
+Telegram's HTML mode (supported tags only, balanced, entities decoded): hex and decimal numeric entities,
+named entities, decoding exactly once, Markdown/HTML/uppercase bold, multiline and unpaired bold, unclosed
+tags, literal «<», «>» and «<i>» text, `<br>`, Ukrainian characters, quotes, numbers, citations, and in the
+end-to-end payload the source label and `https://` links. Whether the artefacts in the copied ford answer
+came from the bot or from copying remains undetermined.

@@ -1104,9 +1104,10 @@ def parse_answer_text(text: str | None) -> dict | None:
         answer = re.split(r"(?im)^\W*СТАТУС\W*:.*$", text)[-1]
         if re.match(r"(?is)^\W*НОТАТКИ", answer):
             return None   # truncated inside the notes: nothing usable for the user
-    # Citations must look like [n] before any check runs: «【3】» read as the number 3 made the number
-    # check delete correct sentences.
-    return {"status": status, "answer": clean_model_text(answer)}
+    # Before any check runs: citations must look like [n] («【3】» was read as the number 3), and entities
+    # written by the model are decoded exactly once («&#x2014;» was read as the number 2014). Rendering
+    # escapes the decoded text for Telegram afterwards.
+    return {"status": status, "answer": html.unescape(clean_model_text(answer))}
 
 
 def clean_model_text(text: str) -> str:
@@ -1131,9 +1132,34 @@ def source_line(n: int, doc: Document, scope: list[str] | None, tz: ZoneInfo) ->
     return f"[{n}] «{title}» — надіслано: {name}, {when} (Київ){place}; файл — кнопкою нижче"
 
 
+_BOLD_MARK = "\x00B\x00"               # internal bold marker; never occurs in model text
+_BOLD_TAG = re.compile(r"</?\s*(?:b|strong)\s*>", re.I)
+_BREAK_TAG = re.compile(r"<\s*br\s*/?\s*>", re.I)
+
+
+def _bold_line(line: str) -> str:
+    """Pair bold markers within one line; an unpaired marker is dropped so the text stays readable."""
+    pieces = line.split(_BOLD_MARK)
+    if len(pieces) % 2 == 0:                          # odd number of markers: drop the last one
+        pieces[-2:] = [pieces[-2] + pieces[-1]]
+    out = []
+    for i, piece in enumerate(pieces):
+        out.append(f"<b>{piece}</b>" if i % 2 and piece.strip() else piece)
+    return "".join(out)
+
+
 def _to_html(text: str) -> str:
+    """Answer text -> Telegram HTML (presentation only).
+
+    The text is already entity-decoded (once, in parse_answer_text). Only bold tags (<b>, <strong>) and
+    <br> are interpreted; any other angle-bracket text stays ordinary text; everything is then escaped.
+    Markdown and HTML bold are paired per line; a marker that cannot be paired is dropped instead of being
+    shown as «**»."""
+    text = _BREAK_TAG.sub("\n", text)
+    text = _BOLD_TAG.sub(_BOLD_MARK, text)
+    text = text.replace("**", _BOLD_MARK)
     escaped = html.escape(text, quote=False)
-    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = "\n".join(_bold_line(line) for line in escaped.split("\n"))
     escaped = re.sub(r"(?m)^\s*[*•]\s+", "• ", escaped)
     escaped = re.sub(r"(?m)^\s*-\s+", "• ", escaped)
     escaped = re.sub(r"(?m)^#{1,6}\s*", "", escaped)
