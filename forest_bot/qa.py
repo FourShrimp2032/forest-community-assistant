@@ -155,10 +155,11 @@ class QAService:
             raw["answer"] = deterministic_repairs(raw["answer"], result.docs, analysis.context)
         if raw and raw.get("status") == "answered":
             context = analysis.context
-            issues = grounding_issues(raw["answer"], result.docs, scope.comparison, context)
+            issues = grounding_issues(raw["answer"], result.docs, scope.comparison, context, question=question)
             if issues and timing.remaining() < 8:
                 log.warning("Grounding issues found but too little time left for a correction; applying fallback")
-                raw["answer"] = apply_grounding_fallback(raw["answer"], result.docs, scope.comparison, context)
+                raw["answer"] = apply_grounding_fallback(raw["answer"], result.docs, scope.comparison, context,
+                                                         question=question)
                 issues = []
             if issues:
                 log.info("Grounding check found %d issue(s); asking for one correction: %s", len(issues),
@@ -177,7 +178,8 @@ class QAService:
                                 exc.__class__.__name__)
                 if corrected and corrected["answer"].strip():
                     raw = corrected
-                raw["answer"] = apply_grounding_fallback(raw["answer"], result.docs, scope.comparison, context)
+                raw["answer"] = apply_grounding_fallback(raw["answer"], result.docs, scope.comparison, context,
+                                                         question=question)
         rendered = render_answer(raw, result, self.tz)
         rendered.evidence_count = len(result.docs)
         return rendered
@@ -300,6 +302,8 @@ ANSWER_SYSTEM = """Ти — помічник мешканців лісових �
 - ПОВНОТА: з кожного документа, що стосується питання, перекажи ВСІ пункти на цю тему, навіть якщо про них прямо не питали: розмір/кількість, строк, кому й куди, чим можна замінити (альтернативи), хто звільнений чи має пільгу, винятки та умови, місце застосування. Не скорочуй і не узагальнюй: «Замість 4 жолудів можна віддати 2 лісові горіхи» — це суттєва деталь, її не можна пропускати.
 - Зберігай ключові формулювання документів (дії, назви, місця) близько до тексту, не замінюй їх синонімами.
 - Міри й одиниці передавай точно як у джерелі, зокрема лісові («шаром у дві долоні» — це товщина шару, а не кількість шарів). Не перетворюй їх на інші одиниці чи кількість і не пиши, що міру не вказано, якщо документ її дає. Не додавай способів виконання (як класти, рівномірно тощо), яких у документі немає.
+- Якщо питання містить хибне твердження (наприклад, неправильне число) і просить його підтвердити — не підтверджуй: почни з «Ні» і наведи правильне значення з джерела («Ні, 4 жолуді з дорослого звіра на місяць, а не 40»).
+- Не виводь того, чого документ прямо не каже: обставини користувача (погода, прикмети) не перетворюй на місяць чи дату — якщо в документі строк задано прикметами, відповідай прикметами; пояснення в документі («це зручно для тих, у кого…») не перетворюй на умову чи вимогу; не додавай відомостей з інших документів, про які не питали, щоб «підтвердити» відповідь.
 - Якщо питання складається з кількох частин (наприклад, «хто голова, хто скарбник і кому віддавати внески»), відповідай на КОЖНУ частину з її джерелом; якщо якоїсь частини в документах немає — прямо скажи про неї.
 - Відповідай не лише на буквальне питання: якщо питають про один крок у певній ситуації (особливо небезпечній), наведи й інші пов'язані дії для цієї ситуації з того самого документа.
 - Після кожного твердження став посилання на документ у квадратних дужках, наприклад [1] або [2][3].
@@ -445,6 +449,13 @@ def build_answer_messages(question: str, result: RetrievalResult, history: list[
             regs = geo.regions_of(m)
             note = "" if regs else " (рукавичка не належить до жодної частини лісу; застосовні лише її власні та загальнолісові поради)"
             coverage_lines.append(f"- «{geo.MITTENS[m]}»: у базі є поради рівнів: {', '.join(have) or 'немає'}{note}")
+            foreign = [r for r in geo.sort_codes({x for o in scope.mittens for x in geo.regions_of(o)})
+                       if r not in regs]
+            if foreign:
+                names = ", ".join(f"«{geo.REGIONS[r]}»" for r in foreign)
+                coverage_lines.append(
+                    f"  Поради для {names} до «{geo.MITTENS[m]}» не застосовуються, бо рукавичка не з цієї частини "
+                    f"лісу; кажи «не застосовується», а не що інша порада «має пріоритет».")
             if len(regs) > 1:
                 names = " і ".join(geo.REGIONS[r] for r in geo.sort_codes(regs))
                 coverage_lines.append(
@@ -554,6 +565,12 @@ def _support(segment_tokens: set[str], doc_tokens: set[str]) -> float:
     return len(segment_tokens & doc_tokens) / len(segment_tokens) if segment_tokens else 1.0
 
 
+_WEAK_ATTRIBUTION = set(tokenize(
+    "тих тим той тому тієї тією потрібно потрібен потрібна потрібне потрібні необхідно слід варто можуть "
+    "може треба мусить інші інших іншим усі всіх всім весь кожен кожного кожному також лише тільки саме "
+    "тоді потім після перед коли якщо поки доки"))
+
+
 def verify_citations(text: str, docs: list[EvidenceDoc]) -> str:
     """Make every citation back the facts of ITS OWN clause.
 
@@ -591,8 +608,9 @@ def verify_citations(text: str, docs: list[EvidenceDoc]) -> str:
                 while missing:
                     best = max((n for n in range(1, len(docs) + 1) if n not in keep and n not in added),
                                key=lambda n: len(doc_tokens[n - 1] & missing), default=None)
-                    # One coincidental word is not a fact from another document; require two.
-                    if best is None or len(doc_tokens[best - 1] & missing) < 2:
+                    # One coincidental word is not a fact from another document; require two content words
+                    # («потрібно», «тих» are not facts: they added the insulation document to a fee clause).
+                    if best is None or len((doc_tokens[best - 1] & missing) - _WEAK_ATTRIBUTION) < 2:
                         break
                     added.append(best)
                     missing -= doc_tokens[best - 1]
@@ -636,7 +654,8 @@ _ABSENCE = re.compile(r"\b(немає|нема|не\s+існує|не\s+пере
 _ABSENCE_TOPIC = re.compile(r"пільг|знижк|зменшен|звільнен|винят\w*|замін|альтернатив")
 _PROPER_ABSENCE = re.compile(r"не\s+згадан|не\s+згаду|не\s+вказан|не\s+зазначен|не\s+містить|не\s+описан|"
                              r"не\s+йдеться|нічого\s+не\s+сказано|не\s+сказано")
-_RELATION = re.compile(r"належ\w*|власн\w*|хазя\w*|господар\w*\s+кошик")
+# «належить до хвойного лісу» (membership of a place in a part of the forest) is geography, not ownership.
+_RELATION = re.compile(r"належ\w*\b(?!\s+до\b)|власн\w*|хазя\w*|господар\w*\s+кошик")
 _POSSESSIVE = re.compile(r"\b[А-ЯІЇЄҐ][а-яіїєґ']+(?:ов|ев|єв|ин|їн)(?:а|ий|е|і|ого|ому|ою|их)\b|"
                          r"\bкошик\w*\s+[А-ЯІЇЄҐ][а-яіїєґ']+")
 _EXCLUSIVE = re.compile(r"\bлише\b|\bлиш\b|\bтільки\b|\bвиключно\b|заборон\w*|не\s+дозволя\w*|не\s+дозволен\w*|"
@@ -657,7 +676,7 @@ _MODAL = re.compile(r"повинн\w*|мусит\w*|мусиш|маєте\s+\w+�
 
 
 def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
-                     context: dict | None = None) -> list[tuple[str, str, str]]:
+                     context: dict | None = None, question: str = "") -> list[tuple[str, str, str]]:
     """Deterministic detectors for common grounding errors. Returns (kind, sentence, explanation)."""
     evidence = "\n".join(d.text for d in docs)
     evidence_norm = geo.normalize(evidence)
@@ -667,7 +686,7 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
     # Values derived from words in the source («вдвічі менші») are allowed: halves and doubles.
     source_numbers = {float(n.replace(",", ".")) for n in _NUMBER.findall(evidence)}
     derived_numbers = set()
-    if "вдвічі" in evidence_norm or "удвічі" in evidence_norm:
+    if re.search(r"вдвічі|удвічі|половин|наполовину", evidence_norm):
         derived_numbers = {v / 2 for v in source_numbers} | {v * 2 for v in source_numbers}
     issues += _context_issues(text, docs, context)
     names = _evidence_names(evidence)
@@ -703,7 +722,8 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
         numbers = set(_NUMBER.findall(_CITATION.sub("", re.sub(r"^\s*\d+[.)]\s+", "", sentence))))
         derivation = bool(re.search(r"вдвічі|удвічі|половин|наполовину|узимку|взимку|зимов", norm))
         allowed = source_numbers | (derived_numbers if derivation else set())
-        unsupported = [n for n in numbers if float(n.replace(",", ".")) not in allowed]
+        unsupported = [n for n in numbers if float(n.replace(",", ".")) not in allowed
+                       and not _rejects_premise_number(n, norm, question)]
         if unsupported and _seasonal_halving_applies(evidence, context) \
                 and _applies_factor(sentence, evidence, 0.5):
             unsupported = []        # e.g. winter dialogue: «1 шишка щотижня» = «2 шишки», halved by the rule
@@ -754,6 +774,17 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
                                    f"пропущено умову «{missing[0]}» з джерела: «{ev.strip()[:120]}»"))
                     break
     return issues
+
+
+_PREMISE_REJECTION = re.compile(r"\bні\b|\bне\b|неправильн\w*|помилк\w*|невірн\w*|замість")
+
+
+def _rejects_premise_number(number: str, sentence_norm: str, question: str) -> bool:
+    """«Ні, 4 жолуді, а не 40»: the user's own wrong number, quoted to reject it, is not a claim."""
+    if not question or not re.search(rf"(?<![\d,.]){re.escape(number)}(?![\d])", question):
+        return False
+    return bool(re.search(rf"(?:\bне|\bні|замість)\s+(?:\w+\s+){{0,2}}{re.escape(number)}(?!\d)", sentence_norm)
+                or (_PREMISE_REJECTION.search(sentence_norm) and re.search(r"неправильн|помилк|невірн", sentence_norm)))
 
 
 _ONLY_WORDS = {"лише", "тільки", "лиш", "виключно"}
@@ -976,9 +1007,9 @@ def _context_issues(text: str, docs: list[EvidenceDoc], context: dict | None) ->
 
 
 def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: bool,
-                             context: dict | None = None) -> str:
+                             context: dict | None = None, question: str = "") -> str:
     """Remove sentences that still fail the grounding check after the model's correction."""
-    issues = grounding_issues(text, docs, comparison, context)
+    issues = grounding_issues(text, docs, comparison, context, question=question)
     if not issues:
         return text
     season_notes = [msg for kind, _, msg in issues if kind == "season"]
@@ -1021,6 +1052,9 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
                 continue
             p = neutral.get(p, p)
             if previous_removed:
+                if _ANAPHORIC.match(p):          # «Це зазначено в документі…» now points at nothing
+                    log.warning("Grounding fallback: dropped %r (its antecedent was removed)", p[:60])
+                    continue
                 p = _drop_dangling_connective(p)
             parts.append(p)
             previous_removed = False
@@ -1029,6 +1063,10 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
     for kind, s, msg in issues:
         log.warning("Grounding fallback: removed %s sentence (%s)", kind, msg[:120])
     result = "\n".join(kept_lines).strip()
+    if bad and not _CITATION.search(result):
+        # Nothing sourced is left (e.g. only «Ні.»): a bare remnant could confirm or deny the wrong thing.
+        log.warning("Grounding fallback: no sourced statement left; answering with a neutral message")
+        return NO_RELIABLE_ANSWER
     for msg in season_notes:
         m = re.search(r"джерело \[(\d+)\] має для нього окреме правило: «(.+?)»", msg)
         if m:
@@ -1041,6 +1079,10 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
             result += "\n\n" + NO_AFFORDABILITY_CONCLUSION
     return result
 
+
+NO_RELIABLE_ANSWER = ("Не вдалося надійно сформулювати відповідь за документами. Спробуйте, будь ласка, "
+                      "запитати ще раз трохи згодом.")
+_ANAPHORIC = re.compile(r"^\W*(?:це|саме\s+це|цей|ця|ці|таке|такий|така|так\s+і|воно|він|вона|вони)\b", re.I)
 
 _CONNECTIVE = re.compile(r"^(\W*)(?:тому|отже|отож|відтак|таким\s+чином|тож|крім\s+того|також|однак|проте|"
                          r"але|при\s+цьому|водночас|зате)\b\s*,?\s*", re.I)

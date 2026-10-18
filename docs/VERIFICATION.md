@@ -14,9 +14,8 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, after the answer-error fixes, the ford retest fix and the formatting fix in
-  section 12): 289 tests pass inside the Docker image (Tesseract included); locally 288 pass and 1 is
-  skipped (the OCR test, which needs Tesseract).
+- Latest run (18 Oct 2026, after the fixes in sections 12 and 13): 296 tests pass inside the Docker image
+  (Tesseract included); locally 295 pass and 1 is skipped (the OCR test, which needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -305,3 +304,44 @@ named entities, decoding exactly once, Markdown/HTML/uppercase bold, multiline a
 tags, literal «<», «>» and «<i>» text, `<br>`, Ukrainian characters, quotes, numbers, citations, and in the
 end-to-end payload the source label and `https://` links. Whether the artefacts in the copied ford answer
 came from the bot or from copying remains undetermined.
+
+## 13. Manual batch, 18 Oct 2026 evening (deployed `666dce2`)
+
+Investigated from the production log and replayed offline; answer texts are not logged, so replays use
+reconstructed outputs and show what the pipeline does with them, not the exact text sent.
+
+**Passed (developer's report):** most of the batch, including the woodpecker «Під ялиною» (half of the
+3-cone contribution; the explicit 1.5 was removed by a safeguard false positive, see below — a clarity
+loss, not a factual failure).
+
+| Finding | Models | Diagnosis |
+|---|---|---|
+| «40 жолудів … підтвердь» answered «Це зазначено в документі … [1]» | gpt-oss-20b (fallback), after 35 s of rate-limit waits; no time left for a correction | **The log confirms that the fallback deleted a sentence containing «40»** (number found in no document) and that the shown answer was what remained. Without the full text it **cannot be established whether the original answer correctly rejected 40**. A reconstructed replay demonstrates the failure mechanism: a correct correction («Ні, 4 жолуді …, а не 40») is deleted whole and leaves exactly the reported fragment, which then reads as a confirmation. |
+| Hazel February → April: exemption cited to the fees document **and** «Як утеплити рукавичку в листяному лісі» | qwen/qwen3.8-27b (fallback) | **Citation repair added it** (log: «[1] corrected to [1, 2]»). Replay: the clause's distinctive words not covered by the fees document were only «потрібно» and «тих», which the insulation text also contains; two such words met the "two uncited words" threshold. |
+| Dam: riverside insulation said to have priority over coniferous advice | qwen/qwen3.8-27b (fallback); correction failed | Place detection treats «біля бобрової греблі … для хвойного лісу» as a comparison and adds the coniferous mittens, so coniferous advice appeared applicable; the model framed it as priority. Also a **post-processing false positive**: «… не належить до хвойного лісу» was deleted as invented ownership («належить»). Routing left unchanged (changing mitten + region detection risks real two-place questions). |
+| «Мурашник може кусати» | first answer gpt-oss-120b; correction qwen/qwen3.8-27b, triggered by the same «належить» false positive | The forest-level source itself says «Мурашники кусаються» («Небезпеки хвойного лісу»); the local source says «мурахи кусають». The wording follows a source, but the local, more precise wording is preferable. |
+| «шаром у дві лапи» → «дві лапи рукавички»; November inferred from «листя облетіло, снігу ще немає» | gpt-oss-20b (fallback); no check fired | **Generation.** The deciduous document sets the time by these very signs; the forest-wide calendar's November was added. The measure check accepts it (same number and unit). |
+| «Якщо у вас більше лісових горіхів…» | not identifiable from the log | **Generation.** The source's «Це зручно для тих, у кого саме горіхів більше» is an explanation, not a condition. |
+
+**Fixes:** a number from the user's question that the answer explicitly rejects («а не 40», «не 40»,
+«неправильно») is not an unsupported claim; after a removal, an anaphoric sentence («Це …», «Цей …») whose
+antecedent is gone is dropped, and if no sourced statement remains the answer is a neutral «could not
+answer reliably» message instead of a bare «Ні.»/«Так.» or fragment; citation repair ignores function
+words («потрібно», «тих», «саме»…) when adding a document; halving stated as «половину» allows the derived
+half; «належить до <частини лісу>» is geography, not ownership; the prompt says that advice of a part of
+the forest the mitten does not belong to «не застосовується» (not "lower priority"), and adds rules for
+false premises («Ні, …, а не N») and against inferring months from circumstances or conditions from
+explanations.
+
+**Tests** (`tests/test_answer_accuracy.py`, 7 new; each fails without its fix): false-premise correction
+kept whole; a confirmed false premise and an invented number never leave a confirmation or fragment; a
+bare yes/no is never left; the fee exemption is cited only to the fees document; «1,5 шишки» kept; dam
+answer keeps «не належить до хвойного лісу», with the applicability line in the prompt.
+
+**Remaining location-routing limitation:** naming a part of the forest as a proposed source of advice
+(«біля бобрової греблі … як радять для хвойного лісу») can be misclassified as a comparison, which adds
+that part's mittens to the question. The prompt line on applicability mitigates the effect on the answer
+but does not fix the routing.
+
+**Not addressed in code (prompt rules only):** «дві лапи рукавички», the November inference and the
+explanation-as-condition wording. **Not verified live:** these fixes have not been retested manually.

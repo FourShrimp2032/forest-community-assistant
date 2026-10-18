@@ -5,6 +5,8 @@ fallback, rendering) with a fake model that returns the kind of output observed 
 the FINAL answer and its sources, not only the prompt.
 """
 
+import re
+
 from forest_bot.llm import LLMRateLimited
 from forest_bot.qa import grounding_issues
 
@@ -295,3 +297,82 @@ async def test_explicitly_established_current_season_is_kept_for_later_questions
     await conversation.on_text(8, "Скільки платити у соснах?")                    # new question, no season word
     assert conversation.store.get_state(8)["context"].get("season") == "зима"
     assert _winter_in_prompt(conversation.llm.answer_prompts[-1])
+
+
+# ------------------------------------------------------------------ batch of 18 Oct (evening)
+
+OAK_FEES = "Членські внески рукавички Під дубом"
+FALSE_PREMISE_Q = "Під дубом внесок 40 жолудів на місяць, правильно? Просто підтвердь."
+OAK_ROUTE = route("pid_dubom", "членський внесок розмір", ["внесок", "жолуді"])
+
+
+async def test_false_premise_correction_is_kept_whole(conversation, archive):
+    # Observed final answer: «Це зазначено в документі … [1].» — the sentence correcting 40 was deleted as an
+    # unsupported number (time budget exhausted, no correction call), leaving an apparent confirmation.
+    observed = (f"Ні, внесок під дубом — 4 жолуді з дорослого звіра на місяць, а не 40 {{{OAK_FEES}}}. "
+                f"Це зазначено в документі «{OAK_FEES}» {{{OAK_FEES}}}.")
+    html, calls, _ = await ask(conversation, FALSE_PREMISE_Q, OAK_ROUTE, observed)
+    body, sources = split(html)
+    assert body.startswith("Ні, внесок під дубом — 4 жолуді з дорослого звіра на місяць, а не 40")
+    assert OAK_FEES in sources and len(calls) == 1
+
+
+async def test_confirmed_false_premise_never_leaves_an_affirmative_fragment(conversation, archive):
+    observed = (f"Так, під дубом внесок 40 жолудів на місяць {{{OAK_FEES}}}. "
+                f"Це зазначено в документі «{OAK_FEES}» {{{OAK_FEES}}}.")
+    html, _, _ = await ask(conversation, FALSE_PREMISE_Q, OAK_ROUTE, observed)     # correction rate-limited
+    body, _ = split(html)
+    assert "40" not in body and "Це зазначено" not in body and not body.lstrip().startswith("Так")
+
+
+async def test_an_invented_number_is_still_rejected(conversation, archive):
+    html, _, _ = await ask(conversation, "Скільки внесок під дубом?", OAK_ROUTE,
+                           f"Внесок під дубом — 40 жолудів на місяць {{{OAK_FEES}}}.")
+    assert "40" not in split(html)[0]
+
+
+HAZEL_FEES = "Членські внески рукавички У ліщині"
+DECIDUOUS_INSULATION = "Як утеплити рукавичку в листяному лісі"
+
+
+async def test_fee_exemption_is_not_attributed_to_the_insulation_document(conversation, archive):
+    # Observed: «[1]» corrected to «[1][2]» because «потрібно» and «тих» also occur in the insulation text.
+    answer = (f"Так, у квітні внесок потрібно сплачувати. Правило про звільнення від сплати для тих, хто спить "
+              f"узимку, діє лише з листопада по березень {{{HAZEL_FEES}}}.")
+    html, _, prompt = await ask(conversation, "Я дорослий мешканець «У ліщині» й сплю взимку. А у квітні треба платити?",
+                                route("u_lishchyni", "членський внесок сплячка звільнення", ["внесок", "спить"]), answer)
+    body, sources = split(html)
+    assert HAZEL_FEES in sources and DECIDUOUS_INSULATION not in sources
+    assert re.search(r"по березень \[\d\]\.$", body.strip())
+
+
+async def test_half_contribution_with_explicit_value_is_kept(conversation, archive):
+    answer = ("Дятел платить половину внеску, бо лікує ялину від шкідників, тобто 1,5 шишки на місяць "
+              "{Членські внески рукавички Під ялиною}.")
+    html, calls, _ = await ask(conversation, "Я Дятел із рукавички «Під ялиною». Який у мене місячний внесок?",
+                               route("pid_yalynoyu", "членський внесок дятел", ["внесок", "дятел"]), answer)
+    assert "1,5 шишки" in split(html)[0] and len(calls) == 1
+
+
+async def test_other_regions_advice_is_inapplicable_not_lower_priority(conversation, archive):
+    q = "Біля бобрової греблі хочу утеплити рукавичку мохом, як радять для хвойного лісу. Підійде?"
+    answer = ("Ні. Біля річки мох не годиться, бо біля води мох гниє; утеплюйте очеретом "
+              "{Як утеплити рукавичку біля річки}. «Біля бобрової греблі» не належить до хвойного лісу, тож порада "
+              "утеплювати мохом для неї не застосовується {Як утеплити рукавичку біля річки}.")
+    conversation.llm.route = {"intent": "question", "needs_location": False, "search_query": "утеплення мох",
+                              "keywords": ["утеплення", "мох"]}                # places come from the message
+    conversation.llm.answer_fn, calls = model(answer)
+    html = (await conversation.on_text(1, q))[-1].text
+    prompt = conversation.llm.answer_prompts[0]
+    assert "до «Біля бобрової греблі» не застосовуються" in prompt and "а не що інша порада «має пріоритет»" in prompt
+    body, _ = split(html)
+    assert "не належить до хвойного лісу" in body and "очеретом" in body and len(calls) == 1
+
+
+def test_a_bare_yes_or_no_is_never_left_after_removals(archive, store):
+    from forest_bot.qa import NO_RELIABLE_ANSWER, apply_grounding_fallback
+    from forest_bot.retrieval import EvidenceDoc
+    docs = [EvidenceDoc(d, [], {}, 1.0) for d in store.active_documents() if d.title == OAK_FEES]
+    out = apply_grounding_fallback("Ні. Під дубом внесок — 40 жолудів на місяць [1].", docs, False,
+                                   question="Скільки внесок під дубом?")
+    assert out == NO_RELIABLE_ANSWER                     # not «Ні.»

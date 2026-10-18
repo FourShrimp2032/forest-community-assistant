@@ -444,6 +444,7 @@ Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 | Version ordering across Drive and Telegram (`modifiedTime` vs receipt time) | ✅ | — offline only |
 | Questions, follow-ups, context, comparisons, missing information | ✅ (fake LLM) | ✅ real models and manual Telegram tests; **full live suite not re-run after the latest answer-check changes** |
 | Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ✅ all three passed a manual retest (ford after a further fix); replays do not establish live answer quality |
+| Fixes for the 18 Oct evening batch (false premise «40», citation, applicability) | ✅ replays of reconstructed outputs | ⏳ manual retest pending |
 | Rate-limit fallback | ✅ | ✅ observed when a daily quota ran out |
 
 **Observed latency** (18 Oct, this machine and network, free-tier keys): 1.3–2.8 s per question when
@@ -472,6 +473,9 @@ are observations, not guarantees.
 - **Answer checks are heuristics.** Wording, completeness and conflict judgement come from the model and
   vary between runs. Checks use word overlap and patterns, not semantic verification. Same-subject conflict
   hints rely on word overlap, so differently worded conflicts rely on the prompt rules.
+- **Place routing:** naming a part of the forest as a proposed source of advice («біля бобрової греблі …
+  як радять для хвойного лісу») can be treated as a comparison and add that part's mittens. A prompt line
+  says such advice does not apply to the asked mitten, which mitigates but does not fix the routing.
 - **Dialogue context** recognises the four seasons, current-season markers, hypothetical wording, and the
   archive's animals in first-person statements; other phrasings may be missed.
 - **«Під вербою»'s two regions:** no priority between them was agreed. As the implementation default, the
