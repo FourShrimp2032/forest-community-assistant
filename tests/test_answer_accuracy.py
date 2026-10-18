@@ -364,7 +364,9 @@ async def test_other_regions_advice_is_inapplicable_not_lower_priority(conversat
     conversation.llm.answer_fn, calls = model(answer)
     html = (await conversation.on_text(1, q))[-1].text
     prompt = conversation.llm.answer_prompts[0]
-    assert "до «Біля бобрової греблі» не застосовуються" in prompt and "а не що інша порада «має пріоритет»" in prompt
+    # Since the routing fix the coniferous forest is a cited source, not a compared place.
+    assert "Користувач посилається на пораду для частини лісу «Хвойний ліс»" in prompt
+    assert "не порівнюй її з порадами для запитаного місця за пріоритетом" in prompt
     body, _ = split(html)
     assert "не належить до хвойного лісу" in body and "очеретом" in body and len(calls) == 1
 

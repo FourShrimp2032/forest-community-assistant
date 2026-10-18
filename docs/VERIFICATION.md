@@ -14,8 +14,8 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, after the fixes in sections 12 and 13): 296 tests pass inside the Docker image
-  (Tesseract included); locally 295 pass and 1 is skipped (the OCR test, which needs Tesseract).
+- Latest run (18 Oct 2026, after the fixes in sections 12 and 13): 306 tests pass inside the Docker image
+  (Tesseract included); locally 305 pass and 1 is skipped (the OCR test, which needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -345,3 +345,37 @@ but does not fix the routing.
 
 **Not addressed in code (prompt rules only):** «дві лапи рукавички», the November inference and the
 explanation-as-condition wording. **Not verified live:** these fixes have not been retested manually.
+
+**Manual retest (developer, 18 Oct 2026, after deploying `c96df76`):**
+- false premise «40 жолудів … підтвердь»: **passed**;
+- hazel February → April: exemption and citations **passed** (only the contribution document cited);
+- riverside insulation with a coniferous suggestion: practical advice correct, but the **applicability
+  explanation failed** — the answer still said riverside advice «має пріоритет» over coniferous advice
+  before saying the latter does not apply. The response took 25 s.
+
+**Diagnosis (log + prompt rebuilt offline on production data):** place detection counted «біля бобрової
+греблі … як радять для хвойного лісу» as a comparison (a mitten plus a region) and expanded the coniferous
+forest into its three mittens, so the prompt named four target places and presented coniferous insulation
+advice as applicable to three of them (9 evidence documents, ≈7,000 prompt tokens); the prompt-only line
+from section 13 could not override that. No river-vs-coniferous priority hint was generated in this case,
+but the hint pairing compared each document's highest level instead of its level for the same place, so
+unrelated places could be ranked. Timing: the answer call took 2.2 s; 22.5 s was waiting on rate limits
+(only qwen/qwen3.8-27b was not blocked), and a first attempt 10 s earlier found all models limited.
+
+**Fixes:** a region named as the source of a proposed recommendation for a mitten outside it (an advising
+verb or «порада/правило/пам'ятка» just before it, no explicit comparison words, not coordinated with
+another place by «і/та/або») is recorded as a **reference**, not a target; the question is scoped to the
+mitten, a router "comparison" flag is ignored in that case, and the prompt states that the cited advice
+does not apply to the mitten and must not be ranked by priority. Specificity hints are built only between
+documents applying to the same place. Offline (keyword-only retrieval) this question's evidence went from
+5 to 2 documents, prompt ≈29 % smaller; the effect with production's hybrid retrieval was not measured.
+
+**Tests** (`tests/test_place_reference.py`, 10): detection of three suggestion forms and of unchanged cases
+(«Порівняй утеплення у хвойному лісі й біля річки», «Порівняй … біля греблі і в хвойному лісі», coordinated
+places without comparison words, a mitten with its own region); hint pairing never ranks different places
+or equal-level regions; end to end, the suggestion is answered for the dam only with the reference line and
+without coniferous evidence, and a genuine two-region comparison keeps both regions and both insulation
+documents without a ranking hint. **These fixes are tested offline only; live verification is pending.**
+
+**Limitation:** reference detection relies on a fixed set of advising words; other phrasings («я чув, що в
+хвойному лісі утеплюють мохом») are still treated as a comparison of places.

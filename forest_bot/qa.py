@@ -44,6 +44,7 @@ class Analysis:
     persist_context: dict | None = None           # what to remember for later turns (None = same as context)
     turn_subject: str | None = None               # another animal this turn is about ("а для зайчика?")
     hypothetical: bool = False
+    reference_regions: list[str] = field(default_factory=list)   # cited as an advice source, not asked about
 
 
 ROUTER_SYSTEM = """You route messages for a Telegram bot that answers questions ONLY from documents of a fictional
@@ -140,7 +141,8 @@ class QAService:
         messages = build_answer_messages(question, result, history[-self.history_turns:], self.tz,
                                          focus=analysis.focus, follow_up=analysis.follow_up,
                                          context=analysis.context, turn_subject=analysis.turn_subject,
-                                         hypothetical=analysis.hypothetical)
+                                         hypothetical=analysis.hypothetical,
+                                         reference_regions=analysis.reference_regions)
         kwargs = {"reasoning_effort": self.answer_reasoning_effort} if self.answer_reasoning_effort else {}
         raw = None
         for attempt in range(2):
@@ -206,7 +208,9 @@ def merge_analysis(message: str, det: geo.DetectedLocations, raw: dict | None,
         if mittens or regions:
             source = "llm"
     whole_forest = det.forest or bool(raw.get("whole_forest"))
-    comparison = det.comparison or bool(raw.get("comparison"))
+    # A region cited only as the source of a suggestion does not make the question a comparison, even if the
+    # router reads it that way.
+    comparison = det.comparison or (bool(raw.get("comparison")) and not det.reference_regions)
     needs_location = bool(raw.get("needs_location")) if llm_used else bool(LOCAL_TOPIC.search(geo.normalize(message)))
 
     scope: QueryScope | None
@@ -275,7 +279,10 @@ def merge_analysis(message: str, det: geo.DetectedLocations, raw: dict | None,
         search_query = f"{search_query} {season_terms}"
     analysis = Analysis(intent, scope, needs_location and scope is None, search_query, source, llm_used,
                         focus=focus, follow_up=follow_up, context=context, persist_context=persist_context,
-                        turn_subject=turn_subject, hypothetical=hypothetical)
+                        turn_subject=turn_subject, hypothetical=hypothetical,
+                        reference_regions=list(det.reference_regions) if det.mittens else [])
+    if analysis.reference_regions:
+        log.info("Regions cited as an advice source, not asked about: %s", analysis.reference_regions)
     log.info("Routed %r -> intent=%s scope=%s (%s) follow_up=%s focus=%r search=%r context=%s", message[:200],
              intent, scope.to_state() if scope else None, source, follow_up, focus[:200], search_query[:200],
              context)
@@ -403,9 +410,11 @@ def _specificity_pairs(docs) -> list[tuple[int, int, str, str, set[str]]]:
     sentences = [[(s, _pair_tokens(s)) for s in _sentences_of(d.text) if len(s) > 15] for d in docs]
     for i, a in enumerate(docs):
         for j, b in enumerate(docs):
-            la, lb = getattr(a, "levels", None), getattr(b, "levels", None)
-            if i == j or not la or not lb or max(la.values()) <= max(lb.values()):
-                continue                                   # only specific (i) vs broader (j)
+            la, lb = getattr(a, "levels", None) or {}, getattr(b, "levels", None) or {}
+            # More specific FOR THE SAME place only: two regions' advice for different mittens are not
+            # ranked against each other (equal level, different applicability).
+            if i == j or not any(t in lb and la[t] > lb[t] for t in la):
+                continue
             best = None
             for sa, ta in sentences[i]:
                 for sb, tb in sentences[j]:
@@ -419,7 +428,8 @@ def _specificity_pairs(docs) -> list[tuple[int, int, str, str, set[str]]]:
 
 def build_answer_messages(question: str, result: RetrievalResult, history: list[dict], tz: ZoneInfo,
                           focus: str = "", follow_up: bool = False, context: dict | None = None,
-                          turn_subject: str | None = None, hypothetical: bool = False) -> list[dict]:
+                          turn_subject: str | None = None, hypothetical: bool = False,
+                          reference_regions: list[str] | None = None) -> list[dict]:
     scope = result.scope
     blocks = []
     for n, ed in enumerate(result.docs, start=1):
@@ -468,6 +478,12 @@ def build_answer_messages(question: str, result: RetrievalResult, history: list[
                   for i, j, snippet in same_subject_pairs(result)]
     if pair_lines:
         coverage_lines += pair_lines
+    for r in reference_regions or []:
+        targets = ", ".join(f"«{geo.MITTENS[m]}»" for m in scope.mittens)
+        coverage_lines.append(
+            f"- Користувач посилається на пораду для частини лісу «{geo.REGIONS[r]}». {targets} до неї не належить, "
+            f"тож ця порада тут не застосовується — так і скажи; не порівнюй її з порадами для запитаного місця "
+            f"за пріоритетом. Відповідай за документами, наведеними нижче.")
     hist = _history_text(history) if history else "(немає)"
     user = (
         f"Місце, про яке питають: {scope.describe()}"

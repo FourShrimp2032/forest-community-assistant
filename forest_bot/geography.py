@@ -212,6 +212,9 @@ class DetectedLocations:
     regions: list[str] = field(default_factory=list)
     forest: bool = False
     comparison: bool = False
+    # Regions the user cites only as the source of a proposed recommendation for a named mitten that is not
+    # in them («біля греблі … як радять для хвойного лісу»): reference, not places asked about.
+    reference_regions: list[str] = field(default_factory=list)
 
     @property
     def codes(self) -> list[str]:
@@ -237,8 +240,30 @@ def detect_locations(text: str) -> DetectedLocations:
     forest = any(re.search(p, norm) for p in FOREST_PATTERNS)
     if re.search(r"\bвесь\s+ліс\b|\bувесь\s+ліс\b|\bцілий\s+ліс\b", norm):
         forest = True
-    comparison = len(mittens) + len(regions) > 1 or any(re.search(p, norm) for p in COMPARISON_PATTERNS)
-    return DetectedLocations(mittens, regions, forest, comparison)
+    explicit_comparison = any(re.search(p, norm) for p in COMPARISON_PATTERNS)
+    reference = []
+    if mittens and not explicit_comparison:
+        reference = [r for r in regions if _cited_as_advice_source(r, norm)]
+        regions = [r for r in regions if r not in reference]
+    comparison = len(mittens) + len(regions) > 1 or explicit_comparison
+    return DetectedLocations(mittens, regions, forest, comparison, reference)
+
+
+# An advising verb or a «порада/правило» noun shortly before the region: the region is where the advice comes
+# from, not where the user is («як радять для хвойного лісу», «за порадою для хвойного лісу»).
+_ADVICE_SOURCE = (r"(?:радять|радить|рекоменду\w*|кажуть|пишуть|заведено|прийнято|порад\w*|правил\w*|"
+                  r"пам'ятк\w*|інструкці\w*)")
+
+
+def _cited_as_advice_source(region: str, norm: str) -> bool:
+    for p in QUERY_PATTERNS.get(region, []):
+        for m in re.finditer(p, norm):
+            before = norm[max(0, m.start() - 40):m.start()]
+            # «X і в хвойному лісі» coordinates two asked places; that is not a citation of advice.
+            if re.search(rf"{_ADVICE_SOURCE}(?:\s+\w+){{0,2}}\s*$", before) and \
+                    not re.search(r"(?:\bі|\bй|\bта|\bабо|\bчи|,)\s*(?:\w+\s*){0,1}$", before):
+                return True
+    return False
 
 
 _STRICT_NAMES = [r"під\s+ялиною", r"[ув]\s+соснах", r"біля\s+мурашника", r"під\s+дубом", r"[ув]\s+ліщині",
