@@ -286,6 +286,7 @@ ANSWER_SYSTEM = """Ти — помічник мешканців лісових �
 - Конфлікт — це ЛИШЕ коли дві поради стосуються ТІЄЇ САМОЇ ситуації чи питання й дають несумісні вказівки (наприклад, різні строки утеплення). Порада на іншу тему (наприклад, тиша в рукавичці) НЕ скасовує й не обмежує пораду про небезпеку чи інше питання. Не вигадуй конфліктів; документи, що не стосуються питання, просто не згадуй.
 - Якщо конкретніша порада СУПЕРЕЧИТЬ ширшій у якомусь пункті — щодо ЦЬОГО пункту відповідай лише конкретнішою. Суперечливу ширшу пораду згадуй тільки якщо пояснюєш розбіжність, і тоді прямо скажи, що для цього місця вона не діє. Не називай конкретнішу пораду «основною» чи «головною»: це натякає, що ширша теж чинна.
 - Це стосується лише суперечливих пунктів: доповнювальні поради частини лісу чи всього лісу (про інше або сумісні з місцевою) і далі наводь із джерелами.
+- Пояснюючи, чому діє конкретніша порада, кажи саме це: «для вашої рукавички діє місцеве правило, воно має пріоритет над порадою для всієї частини лісу (чи всього лісу)». Не вигадуй відмінностей між порадами чи словами, яких документи не роблять (наприклад, не протиставляй однокореневі слова на кшталт «брід» і «вбрід»).
 - Якщо суперечать поради ОДНАКОВОЇ конкретності (наприклад, для «Під вербою» поради листяного лісу і поради біля річки) — наведи обидві з джерелами й поясни розбіжність, не обирай самостійно.
 - Порада застосовна лише там, де вказано в полі «Застосовність». Не переноси пораду для однієї частини лісу чи рукавички на інші. «На узліссі» не належить до жодної частини лісу.
 - Якщо для запитаного місця немає місцевої поради, прямо скажи це і подай загальнолісову пораду.
@@ -294,6 +295,8 @@ ANSWER_SYSTEM = """Ти — помічник мешканців лісових �
 - Коротко й по суті; для складних відповідей — короткі абзаци або пункти «- ».
 - ПОВНОТА: з кожного документа, що стосується питання, перекажи ВСІ пункти на цю тему, навіть якщо про них прямо не питали: розмір/кількість, строк, кому й куди, чим можна замінити (альтернативи), хто звільнений чи має пільгу, винятки та умови, місце застосування. Не скорочуй і не узагальнюй: «Замість 4 жолудів можна віддати 2 лісові горіхи» — це суттєва деталь, її не можна пропускати.
 - Зберігай ключові формулювання документів (дії, назви, місця) близько до тексту, не замінюй їх синонімами.
+- Міри й одиниці передавай точно як у джерелі, зокрема лісові («шаром у дві долоні» — це товщина шару, а не кількість шарів). Не перетворюй їх на інші одиниці чи кількість і не пиши, що міру не вказано, якщо документ її дає. Не додавай способів виконання (як класти, рівномірно тощо), яких у документі немає.
+- Якщо питання складається з кількох частин (наприклад, «хто голова, хто скарбник і кому віддавати внески»), відповідай на КОЖНУ частину з її джерелом; якщо якоїсь частини в документах немає — прямо скажи про неї.
 - Відповідай не лише на буквальне питання: якщо питають про один крок у певній ситуації (особливо небезпечній), наведи й інші пов'язані дії для цієї ситуації з того самого документа.
 - Після кожного твердження став посилання на документ у квадратних дужках, наприклад [1] або [2][3].
 - Не додавай знань поза документами. Якщо відповіді в документах немає — status "not_found" і коротко скажи, що такої інформації не знайдено (можеш запропонувати уточнити питання).
@@ -349,23 +352,60 @@ def same_subject_pairs(result: RetrievalResult) -> list[tuple[int, int, str]]:
     explicitly; complementary documents about other things are not paired."""
     if result.scope.kind != "mittens":
         return []
+    return [(i, j, " ".join(sorted(shared))[:60]) for i, j, _, _, shared in _specificity_pairs(result.docs)]
+
+
+_MONTH = re.compile(r"січн\w*|лют\w*|берез\w*|квітн\w*|травн\w*|червн\w*|липн\w*|серпн\w*|вересн\w*|"
+                    r"жовтн\w*|листопад\w*|грудн\w*")
+_NEGATION = re.compile(r"\bне\b|\bніколи\b|заборон\w*")
+_PERMISSION = re.compile(r"\bможна\b|безпечн\w*|дозвол\w*|\b(?:тільки|лише)\s+(?:тоді|якщо|коли)\b|\bякщо\b")
+
+
+def _pair_tokens(sentence: str) -> set[str]:
+    """Content stems, plus the stem without a leading «в»/«у» («вбрід» ~ «брід», «утепл» ~ «тепл»)."""
+    tokens = _content_tokens(sentence)
+    return tokens | {t[1:] for t in tokens if len(t) >= 5 and t[0] in "ву"}
+
+
+def _months(sentence: str) -> set[str]:
+    return {m[:5] for m in _MONTH.findall(geo.normalize(sentence))}
+
+
+def _sentences_conflict(sa: str, ta: set[str], sb: str, tb: set[str]) -> set[str] | None:
+    """Shared subject words when two sentences plausibly say different things about the same subject:
+    large word overlap; the same action with different months; or a prohibition vs a (conditional)
+    permission about the same thing."""
+    shared = ta & tb
+    if len(shared) >= 3 and len(shared) >= 0.5 * min(len(ta), len(tb)):
+        return shared
+    key = {t for t in shared if len(t) >= 4}
+    if key and _months(sa) and _months(sb) and _months(sa) != _months(sb):
+        return shared
+    na, nb = geo.normalize(sa), geo.normalize(sb)
+    if len(shared) >= 2 and ((_NEGATION.search(na) and _PERMISSION.search(nb))
+                             or (_PERMISSION.search(na) and _NEGATION.search(nb))):
+        return shared
+    return None
+
+
+def _specificity_pairs(docs) -> list[tuple[int, int, str, str, set[str]]]:
+    """(specific doc no., broader doc no., specific sentence, broader sentence, shared words) for documents
+    of different specificity for the asked place that state something about the same subject."""
     pairs = []
-    sentences = [[(s, _content_tokens(s)) for s in _sentences_of(d.text) if len(s) > 15] for d in result.docs]
-    for i, a in enumerate(result.docs):
-        for j, b in enumerate(result.docs):
-            if i == j or not a.levels or not b.levels:
-                continue
-            if max(a.levels.values()) <= max(b.levels.values()):
+    sentences = [[(s, _pair_tokens(s)) for s in _sentences_of(d.text) if len(s) > 15] for d in docs]
+    for i, a in enumerate(docs):
+        for j, b in enumerate(docs):
+            la, lb = getattr(a, "levels", None), getattr(b, "levels", None)
+            if i == j or not la or not lb or max(la.values()) <= max(lb.values()):
                 continue                                   # only specific (i) vs broader (j)
             best = None
-            for _, ta in sentences[i]:
-                for _, tb in sentences[j]:
-                    shared = ta & tb
-                    if len(shared) >= 3 and len(shared) >= 0.5 * min(len(ta), len(tb)):
-                        if best is None or len(shared) > len(best):
-                            best = shared
+            for sa, ta in sentences[i]:
+                for sb, tb in sentences[j]:
+                    shared = _sentences_conflict(sa, ta, sb, tb)
+                    if shared and (best is None or len(shared) > len(best[2])):
+                        best = (sa, sb, shared)
             if best:
-                pairs.append((i + 1, j + 1, " ".join(sorted(best))[:60]))
+                pairs.append((i + 1, j + 1, best[0], best[1], best[2]))
     return pairs
 
 
@@ -407,7 +447,8 @@ def build_answer_messages(question: str, result: RetrievalResult, history: list[
                     f"  «{geo.MITTENS[m]}» належить одразу до двох частин лісу ({names}): врахуй доречні поради "
                     f"ОБОХ частин; якщо вони розходяться, наведи обидві з джерелами (пріоритету між ними немає).")
     pair_lines = [f"- Увага: [{i}] і [{j}] говорять про той самий предмет («{snippet}»). Якщо вони дають різні "
-                  f"вказівки — для запитаного місця діє [{i}] (конкретніша), а [{j}] тут не застосовується; якщо "
+                  f"вказівки — для запитаного місця діє [{i}] (конкретніша), а [{j}] тут не застосовується; пояснюй "
+                  f"це саме так (пріоритет конкретнішого місця), без вигаданих відмінностей між ними; якщо "
                   f"вони сумісні або доповнюють одне одного — наведи обидва."
                   for i, j, snippet in same_subject_pairs(result)]
     if pair_lines:
@@ -625,6 +666,10 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
     if "вдвічі" in evidence_norm or "удвічі" in evidence_norm:
         derived_numbers = {v / 2 for v in source_numbers} | {v * 2 for v in source_numbers}
     issues += _context_issues(text, docs, context)
+    names = _evidence_names(evidence)
+    issues += _measure_issues(answer_sentences, docs)
+    issues += _distinction_issues(answer_sentences, evidence_norm)
+    issues += _specificity_issues(answer_sentences, docs)
     for index, sentence in enumerate(answer_sentences):
         # A conclusion of obligation/prohibition drawn right after "not mentioned" is an inference from silence.
         if index and _CONCLUSION.search(geo.normalize(sentence)) and _MODAL.search(geo.normalize(sentence)) \
@@ -646,6 +691,8 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
             issues.append(("relation", sentence,
                            f"вигаданий зв'язок «{rel.group(0)}», якого немає в джерелі"))
         for m in _POSSESSIVE.finditer(_CITATION.sub("", sentence)):
+            if not _is_name_possessive(m.group(0), names):
+                continue                    # «Головою», «Товщина»: ordinary nouns, not «Кабанова»
             if geo.normalize(m.group(0)) not in evidence_norm:
                 issues.append(("relation", sentence, f"вигаданий зв'язок «{m.group(0)}» (у джерелі такого немає)"))
                 break
@@ -696,7 +743,8 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
             if len(shared) >= 3 and len(shared) >= 0.7 * len(ev_tokens):
                 norm_season = re.sub(r"\bвзимку\b", "узимку", norm)
                 missing = [q for q in quals
-                           if re.sub(r"\bвзимку\b", "узимку", q) not in norm_season and not set(tokenize(q)) & seg]
+                           if re.sub(r"\bвзимку\b", "узимку", q) not in norm_season and not set(tokenize(q)) & seg
+                           and not (q in _ONLY_WORDS and _ONLY.search(norm))]
                 if missing:
                     issues.append(("qualifier", sentence,
                                    f"пропущено умову «{missing[0]}» з джерела: «{ev.strip()[:120]}»"))
@@ -704,11 +752,120 @@ def grounding_issues(text: str, docs: list[EvidenceDoc], comparison: bool,
     return issues
 
 
+_ONLY_WORDS = {"лише", "тільки", "лиш", "виключно"}
+_ONLY = re.compile(r"\b(?:лише|тільки|лиш|виключно)\b")     # «лише за умов…» restates «тільки тоді, коли…»
+
+
+def _evidence_names(evidence: str) -> set[str]:
+    """Characters' names: capitalised words inside a sentence (not merely sentence-initial)."""
+    return {m.group(1).lower() for m in re.finditer(r"(?<![.!?\n«\"])(?<!^)\s([А-ЯІЇЄҐ][а-яіїєґ']{2,})", evidence)}
+
+
+def _is_name_possessive(word: str, names: set[str]) -> bool:
+    """«Кабанова» (from «Кабан»), but not «Головою» or «Товщина» (no character «Гол…»/«Товщ…»)."""
+    if " " in word:                                   # «кошик Кабана» form
+        return True
+    base = re.sub(r"(?:ов|ев|єв|ин|їн)(?:а|ий|е|і|ого|ому|ою|их)$", "", word).lower()
+    return len(base) >= 3 and any(n.startswith(base) and len(n) - len(base) <= 3 for n in names)
+
+
+_NUMBER_WORDS = {"один": 1, "одна": 1, "одне": 1, "одного": 1, "одній": 1, "два": 2, "дві": 2, "двох": 2,
+                 "три": 3, "трьох": 3, "чотири": 4, "чотирьох": 4, "п'ять": 5, "п'яти": 5, "шість": 6,
+                 "шести": 6, "сім": 7, "семи": 7, "вісім": 8, "восьми": 8, "дев'ять": 9, "десять": 10}
+_NOT_STATED = re.compile(r"не\s+(?:уточн|вказ|зазнач|визнач|навед|сказан|згадан|описан)\w*")
+
+
+def _measures(sentence: str) -> list[tuple[float, set[str]]]:
+    """(value, stems of the next two words) for digits and number words: «шаром у три лапи» -> (3, {лапи…})."""
+    words = re.findall(r"\d+(?:[.,]\d+)?|[^\W\d_]+(?:'[^\W\d_]+)?|[.!?;:,]", _CITATION.sub(" ", sentence.lower()))
+    out = []
+    for i, w in enumerate(words):
+        value = float(w.replace(",", ".")) if w[0].isdigit() else _NUMBER_WORDS.get(w)
+        if value is None:
+            continue
+        nxt = []
+        for x in words[i + 1:i + 3]:
+            if not x[0].isalpha():
+                break
+            nxt.append(x)
+        units = {t for t in tokenize(" ".join(nxt)) if not t[0].isdigit()}
+        if units:
+            out.append((value, units))
+    return out
+
+
+def _measure_issues(answer_sentences: list[str], docs) -> list[tuple[str, str, str]]:
+    """A source measure changed into another unit or count («шаром у три лапи» -> «три шари»), or declared
+    unspecified although the source gives it."""
+    source = [(n, s, _measures(s), _content_tokens(s)) for n, d in enumerate(docs, start=1)
+              for s in _sentences_of(d.text)]
+    stated = [(v, u) for _, _, ms, _ in source for v, u in ms]
+    issues = []
+    for sentence in answer_sentences:
+        seg, found, norm = _content_tokens(sentence), _measures(sentence), geo.normalize(sentence)
+        for n, src, src_measures, src_tokens in source:
+            if not src_measures or not {t for t in seg & src_tokens if len(t) >= 3 and not t[0].isdigit()}:
+                continue                                    # not the same topic
+            # Same number as the source's measure, but with a unit the documents never use with any number
+            # (derived values of a known unit, e.g. «1 шишка» from «вдвічі менші», are checked elsewhere).
+            changed = any(any(v == value for v, _ in src_measures)
+                          and not any(units & u for _, u in stated) for value, units in found)
+            denied = _NOT_STATED.search(norm) and any(v == value and units & u for value, units in found
+                                                      for v, u in src_measures)
+            if changed:
+                issues.append(("measure", sentence, f"міру змінено: у джерелі [{n}] — «{src.strip()}»; "
+                                                    f"передай її дослівно, не як інші одиниці чи кількість"))
+                break
+            if denied:
+                issues.append(("measure", sentence, f"джерело [{n}] прямо дає міру: «{src.strip()}» — "
+                                                    f"не пиши, що її не вказано"))
+                break
+    return issues
+
+
+def _distinction_issues(answer_sentences: list[str], evidence_norm: str) -> list[tuple[str, str, str]]:
+    """«це стосується саме бріду, а не переходу вбрід»: a contrast between two forms of the same word that
+    the documents do not make."""
+    issues = []
+    for sentence in answer_sentences:
+        norm = geo.normalize(_CITATION.sub("", sentence))
+        for m in re.finditer(r"(?:,|—|-)?\s*(?:а|але)\s+не\s+([^,.;:!?]+)", norm):
+            left = re.split(r"[,;:—(]", norm[:m.start()])[-1]
+            lt, rt = _pair_tokens(left), _pair_tokens(m.group(1))
+            same = {t for t in lt & rt if len(t) >= 4}
+            if same and f"а не {m.group(1).strip()}" not in evidence_norm:
+                issues.append(("distinction", sentence, f"вигадана відмінність («{left.strip()} — а не "
+                                                        f"{m.group(1).strip()}»): документи її не роблять"))
+                break
+    return issues
+
+
+def _specificity_issues(answer_sentences: list[str], docs) -> list[tuple[str, str, str]]:
+    """The answer gives a broader document's month where a more specific one sets another for the same
+    action (e.g. forest-wide «у листопаді» vs coniferous «у жовтні»)."""
+    issues = []
+    for i, j, specific, broader, _ in _specificity_pairs(docs):
+        ms, mb = _months(specific), _months(broader)
+        if not ms or not mb or ms == mb:
+            continue
+        subject = {t for t in _pair_tokens(specific) & _pair_tokens(broader) if len(t) >= 4}
+        for sentence in answer_sentences:
+            months = _months(sentence)
+            if months & (mb - ms) and not months & ms and subject & _pair_tokens(sentence) \
+                    and not _NOT_APPLIES.search(geo.normalize(sentence)):
+                issues.append(("specificity", sentence, f"для запитаного місця діє конкретніше джерело [{i}]: "
+                                                        f"«{specific.strip()}»; [{j}] тут не застосовується"))
+    return issues
+
+
+_NOT_APPLIES = re.compile(r"не\s+діє|не\s+застосов|не\s+стосу|натомість|має\s+пріоритет")
+
+
 GROUNDING_CORRECTION = (
     "Перевір свою відповідь за документами. Знайдено проблеми:\n{issues}\n"
     "Виправ лише ці речення: «не згадано» замість «немає»; зв'язки — так, як у джерелі (без «належить», "
     "присвійних форм); умови фактів (вік, сезон, для кого це названо) — повністю, або прибери повтор; без вигаданих заборон — «для X передбачено, для інших не зазначено» замість «ні» чи «лише X»; "
-    "лише числа з документів, без перерахунків; висновок «дешевше» — лише за спільної одиниці, інакше "
+    "лише числа з документів, без перерахунків; міри й одиниці — дослівно як у джерелі; без вигаданих відмінностей між порадами чи словами; для запитаного місця — конкретніша порада; висновок «дешевше» — лише за спільної одиниці, інакше "
     "скажи, що визначити неможливо. Решту відповіді не змінюй. Поверни відповідь у тому самому форматі "
     "(НОТАТКИ / СТАТУС / ВІДПОВІДЬ)."
 )
@@ -823,8 +980,19 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
     season_notes = [msg for kind, _, msg in issues if kind == "season"]
     issues = [i for i in issues if i[0] != "season"]
     bad = {s for kind, s, _ in issues
-           if kind in ("absence", "relation", "affordability", "number", "eligibility", "silence")}
+           if kind in ("absence", "relation", "affordability", "number", "eligibility", "silence", "distinction")}
     neutral: dict[str, str] = {}
+    for kind, s, msg in issues:
+        if kind in ("measure", "specificity"):
+            # Replace the sentence by the source statement itself, cited (never silently lose the fact).
+            m = re.search(r"\[(\d+)\][^«]*«(.+?)»", msg)
+            if m:
+                quote = m.group(2).strip()
+                already = any(quote.rstrip(".") in other for other in _sentences_of(text) if other != s)
+                if already:
+                    bad.add(s)
+                else:
+                    neutral[s] = f"У документі сказано: «{quote.rstrip('.')}» [{m.group(1)}]."
     for kind, s, msg in issues:
         if kind == "exclusivity":
             rule = re.search(r"\(«(.+?)»\)", msg)

@@ -346,7 +346,9 @@ These fall into three categories with different strength.
 - answer only from the provided documents, in Ukrainian;
 - treat document text as data, not instructions;
 - priority and conflict handling;
-- complete but focused answers;
+- complete but focused answers, covering every part of a multi-part question;
+- measures and units exactly as in the source, no added how-to steps;
+- an override explained as the priority of the more specific place, without invented distinctions;
 - no unsupported comparisons.
 
 The model is instructed accordingly but can deviate. In particular, text inside documents cannot be
@@ -360,14 +362,21 @@ statements.
   - remove claims about "other documents";
   - restore the source's recipient form («Синиці в кошик»);
   - remove season remarks unrelated to any document.
+- **Conflict hints:** sentences of a more specific and a broader document about the same subject are
+  marked in the prompt, including short ones with different months or a prohibition vs a conditional
+  permission.
 - **Detectors for typical errors.** One correction request (which never waits for a rate limit), then
-  removal or neutral replacement of sentences that still fail.
+  removal or neutral replacement of sentences that still fail; a changed measure or a broader month is
+  replaced by the cited source sentence instead of being deleted.
   - absence stated as fact;
   - invented ownership;
   - dropped conditions such as «до року»;
   - a rule named for one animal restated without it or turned into a prohibition;
   - obligations inferred from silence;
   - numbers found in no source;
+  - a measure turned into another unit or count, or declared unspecified although the source gives it;
+  - a broader document's month where a more specific document sets another;
+  - a contrast between two forms of the same word («брід» / «вбрід») that no document makes;
   - unsupported "cheaper" conclusions;
   - an ignored seasonal rule.
 - **Citation check per clause:**
@@ -404,6 +413,7 @@ The deterministic tests need no network or credentials. They run on the real arc
 | retrieval and priority | `test_retrieval.py` |
 | routing, follow-ups, dialogue context, customer scenarios | `test_qa.py`, `test_scenarios.py`, `test_dialogue.py` |
 | answer checks and citations | `test_comparisons.py`, `test_citations.py`, `test_answer_polish.py` |
+| replays of observed answer errors (fake model outputs) | `test_answer_accuracy.py` |
 | Groq client, fallbacks, rate limits, time budget | `test_llm.py`, `test_rate_limits.py` |
 
 Optional live tests (`-m live`, need keys, consume Groq quota): `tests/live/test_live_drive.py`,
@@ -431,6 +441,7 @@ Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 | Telegram upload lifecycle across users: name collection, place clarification, replacement by another user, withdrawal, per-user lists, regional fallback, persistence after restart | ✅ | ✅ manual tests by the developer (logs corroborate replacements and withdrawals) |
 | Version ordering across Drive and Telegram (`modifiedTime` vs receipt time) | ✅ | — offline only |
 | Questions, follow-ups, context, comparisons, missing information | ✅ (fake LLM) | ✅ real models and manual Telegram tests; **full live suite not re-run after the latest answer-check changes** |
+| Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ⏳ manual retest pending; replays do not establish live answer quality |
 | Rate-limit fallback | ✅ | ✅ observed when a daily quota ran out |
 
 **Observed latency** (18 Oct, this machine and network, free-tier keys): 1.3–2.8 s per question when

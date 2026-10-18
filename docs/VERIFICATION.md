@@ -14,8 +14,8 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, with the bundled snapshot): 256 tests pass inside the Docker image (Tesseract
-  included); locally 255 pass and 1 is skipped (the OCR test, which needs Tesseract).
+- Latest run (18 Oct 2026, after the answer-error fixes in section 12): 265 tests pass inside the Docker
+  image (Tesseract included); locally 264 pass and 1 is skipped (the OCR test, which needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -220,3 +220,35 @@ active and the state did not change.
 **Not verified live:** sync updates and removals of snapshot-backed records (offline only), and a
 Telegram-connected start with the snapshot (needs a separate test bot). The production bot was not
 changed: it runs on its existing database, where the import is skipped by design.
+
+## 12. Answer errors from manual tests (18 Oct 2026)
+
+Three answers from the developer's manual tests were wrong. Investigated from the production logs (models,
+fallbacks, correction calls, safeguard actions) and by rebuilding the real prompts on production data
+without LLM calls. In all three cases every needed fact was retrieved and was in the prompt. The logs do
+not record answer text, so only the logged sentences are quoted here.
+
+| Question | Models | Diagnosis |
+|---|---|---|
+| Ford at the beaver dam: correct «no», but an invented «брід vs вбрід» distinction | first answer gpt-oss-120b; correction qwen/qwen3.8-27b (fallback; 120b rate-limited) | Post-processing false positive: the qualifier check did not accept «лише за умов…» as restating «тільки тоді, коли…» and requested a correction. The final answer came from that correction call; **which call originated the distinction is not confirmed**. No conflict hint was generated for the local ban vs the regional conditional permission. |
+| Insulation «У соснах»: «три шари», thickness "not specified", added «рівномірно», only «Календар сезонів» cited | first answer gpt-oss-20b (fallback); correction gpt-oss-120b | **Generation error, compounded by post-processing.** The model misread «шаром у три лапи», declared the thickness unspecified and added an application instruction. The ownership check then misread the sentence-initial noun «Товщина» as a possessive adjective; the sentence still failed after the correction and was deleted, which removed the only citation of the coniferous document. No October-vs-November conflict hint was generated. |
+| Head and treasurer «Під вербою» omitted | first answer qwen/qwen3.8-27b (fallback); correction rate-limited on all models | **Caused by post-processing.** The model's sentence «Головою ОСМД … є Качка, а скарбником — Жабка [1]» was correct; the ownership check misread «Головою» as a possessive adjective, and the fallback deleted it. |
+
+**Fixes:** possessive check limited to adjectives formed from a character name in the sources; «лише» /
+«тільки» / «лиш» / «виключно» treated as one qualifier; conflict hints for short same-subject sentences
+with different months or a prohibition vs a conditional permission («вбрід» ~ «брід»); new checks for
+changed or denied measures, broader months overriding a more specific document, and contrasts between
+forms of the same word; a failing measure or month is replaced by the cited source sentence; prompt rules
+for measures, override explanations and multi-part questions. Across 64 sample prompts (8 mittens × 8
+topics) the conflict hints went from 12 to 14: only the real October/November insulation conflicts were
+added.
+
+**Tests:** `tests/test_answer_accuracy.py` (9 tests) runs the full answer path on the real archive with a
+fake model that **replays the observed outputs** (and expected correct ones) and checks the final answer
+and its sources. These replays show how retrieval, prompts and post-processing now handle those outputs;
+**they do not establish live answer quality**, which depends on the models and varies between runs. The
+answers that were correct in the same session (willow stones, hedgehog in November, hazel honey and
+raspberries) are replayed as well and pass unchanged.
+
+**Not guarded deterministically:** invented application wording such as «рівномірно по всій поверхні»
+(prompt rule only). **Pending:** manual retest of the three questions on the deployed bot.
