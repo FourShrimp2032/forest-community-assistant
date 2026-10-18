@@ -1,0 +1,14 @@
+[project]
+name = "forest-assistant"
+version = "1.0.0"
+description = "Telegram bot answering questions from forest community (ОСМД) documents"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "live: tests that call real external services (Groq, Google Drive); skipped without credentials",
+]
+addopts = "-m 'not live'"

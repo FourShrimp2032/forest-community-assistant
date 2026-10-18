@@ -1,0 +1,1 @@
+"""Forest community document assistant."""

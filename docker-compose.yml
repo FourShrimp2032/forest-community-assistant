@@ -1,0 +1,19 @@
+services:
+  bot:
+    build:
+      context: .
+      args:
+        INSTALL_DEV: "true"   # include pytest so tests can run in the same image
+    image: forest-assistant:latest
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      DATA_DIR: /data
+      FASTEMBED_CACHE_DIR: /opt/models
+    volumes:
+      - forest-data:/data
+    restart: unless-stopped
+
+volumes:
+  forest-data:
