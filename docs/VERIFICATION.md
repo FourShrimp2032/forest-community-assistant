@@ -14,8 +14,8 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, after the fixes in sections 12 and 13): 306 tests pass inside the Docker image
-  (Tesseract included); locally 305 pass and 1 is skipped (the OCR test, which needs Tesseract).
+- Latest run (18 Oct 2026, after the fixes in sections 12 and 13): 310 tests pass inside the Docker image
+  (Tesseract included); locally 309 pass and 1 is skipped (the OCR test, which needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -379,3 +379,35 @@ documents without a ranking hint. **These fixes are tested offline only; live ve
 
 **Limitation:** reference detection relies on a fixed set of advising words; other phrasings («я чув, що в
 хвойному лісі утеплюють мохом») are still treated as a comparison of places.
+
+**Manual retest (developer, 18 Oct 2026, after deploying `4bbc9d0`):**
+- riverside suggestion: **passed** (reed, moss rots, coniferous advice does not apply). The question text
+  contained a pasted «Надішли /reset, потім:», so no reset actually happened;
+- genuine two-region comparison («Порівняй, чим утеплюють рукавички у хвойному лісі та біля річки»):
+  **failed**. Both regions' materials were listed, but «У документі сказано: «Утеплюйте рукавичку в жовтні»
+  [1].» was inserted in the riverside section and again in the summary, and the riverside item was lost.
+
+**Diagnosis — post-processing, confirmed by the log.** qwen/qwen3.8-27b answered (gpt-oss-120b rate-limited)
+and added months although only materials were asked (generation). The month check then flagged three
+November sentences, two of them about the river and one naming no place; the correction was rate-limited,
+and the fallback replaced each with the coniferous source sentence (the log quotes «Утеплюйте рукавичку в
+жовтні.» [3] for each; renumbered to [1] for display). The conflict pair (coniferous insulation vs the
+forest-wide calendar) is valid for the coniferous forest only, but the check applied it to any sentence
+with November and insulation, regardless of the place the sentence was about. The replacement also did
+not notice a quote it had already inserted.
+
+**Fixes:** with evidence for several places (a comparison, several mittens), a sentence is checked against a
+conflict pair only if it names that pair's place and no other; otherwise it is left unchanged, never
+replaced by another place's rule. A source sentence is inserted at most once. Note on the river: the
+forest-wide November is a general rule where no more specific advice exists; it is not the rule for every
+riverside mitten — «Під вербою» also belongs to the deciduous forest (after leaf fall, before the first
+snow) — so the regression for different valid months is mitten-level («У соснах» vs «Біля бобрової
+греблі»).
+
+**Tests** (`tests/test_place_reference.py`, 4 new, final rendered answer): the reconstructed retest output
+keeps the riverside materials and preparation with no October and no inserted quote; the expected focused
+materials comparison is delivered unchanged with both insulation documents cited and no month; «У соснах»
+October and «Біля бобрової греблі» November are both kept; a single-place «У соснах» answer still gets the
+October repair, with the quote once. Without the scope check two of them fail, without the deduplication
+one. **Live verification pending.** Not addressed in code: months added to a materials comparison (prompt
+rules only); in a multi-place answer, a sentence about one place that does not name it is not checked.

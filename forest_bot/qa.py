@@ -895,12 +895,20 @@ def _specificity_issues(answer_sentences: list[str], docs) -> list[tuple[str, st
     """The answer gives a broader document's month where a more specific one sets another for the same
     action (e.g. forest-wide «у листопаді» vs coniferous «у жовтні»)."""
     issues = []
+    # Every place the evidence is about. With several (a comparison, several mittens), a sentence is checked
+    # against a pair only if it names that pair's place and no other: the broader month may be the valid rule
+    # for another place (forest-wide November for the river while the coniferous forest says October).
+    targets = {t for d in docs for t in (getattr(d, "levels", None) or {}) if t}
     for i, j, specific, broader, _ in _specificity_pairs(docs):
         ms, mb = _months(specific), _months(broader)
         if not ms or not mb or ms == mb:
             continue
+        a, b = docs[i - 1].levels, docs[j - 1].levels
+        pair_places = {t for t in a if t in b and a[t] > b[t]}
         subject = {t for t in _pair_tokens(specific) & _pair_tokens(broader) if len(t) >= 4}
         for sentence in answer_sentences:
+            if len(targets) > 1 and not _only_about(sentence, pair_places, targets):
+                continue                     # scope of the sentence not reliably known: never substitute
             months = _months(sentence)
             if months & (mb - ms) and not months & ms and subject & _pair_tokens(sentence) \
                     and not _NOT_APPLIES.search(geo.normalize(sentence)):
@@ -910,6 +918,25 @@ def _specificity_issues(answer_sentences: list[str], docs) -> list[tuple[str, st
 
 
 _NOT_APPLIES = re.compile(r"не\s+діє|не\s+застосов|не\s+стосу|натомість|має\s+пріоритет")
+
+
+def _places_named(sentence: str) -> set[str]:
+    """Mitten and region codes a sentence explicitly names (a mitten also names its regions)."""
+    d = geo.detect_locations(sentence)
+    named = set(d.mittens) | set(d.regions) | set(d.reference_regions)
+    return _with_regions(named)
+
+
+def _with_regions(codes: set[str]) -> set[str]:
+    """Codes plus the regions of the mittens among them (region codes stay as they are)."""
+    return set(codes) | {r for c in codes if geo.is_mitten(c) for r in geo.regions_of(c)}
+
+
+def _only_about(sentence: str, places: set[str], targets: set[str]) -> bool:
+    """The sentence names the pair's place(s) and no other place of this answer."""
+    named = _places_named(sentence) & _with_regions(targets)
+    allowed = _with_regions(places)
+    return bool(named & allowed) and not (named - allowed)
 
 
 GROUNDING_CORRECTION = (
@@ -1039,10 +1066,11 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
             m = re.search(r"\[(\d+)\][^«]*«(.+?)»", msg)
             if m:
                 quote = m.group(2).strip()
-                already = any(quote.rstrip(".") in other for other in _sentences_of(text) if other != s)
+                already = any(quote.rstrip(".") in other for other in _sentences_of(text) if other != s) \
+                    or any(quote.rstrip(".") in inserted for inserted in neutral.values())
                 if already:
-                    bad.add(s)
-                else:
+                    bad.add(s)              # the source sentence is already stated once: never repeat it
+                elif s not in neutral:
                     neutral[s] = f"У документі сказано: «{quote.rstrip('.')}» [{m.group(1)}]."
     for kind, s, msg in issues:
         if kind == "exclusivity":

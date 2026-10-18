@@ -92,3 +92,98 @@ async def test_genuine_region_comparison_keeps_both_regions_without_priority_hin
     assert RIVER_INSULATION in titles and CONIFER_INSULATION in titles
     i, j = titles.index(CONIFER_INSULATION) + 1, titles.index(RIVER_INSULATION) + 1
     assert f"[{i}] і [{j}]" not in header and f"[{j}] і [{i}]" not in header   # equal level: no ranking hint
+
+
+# ------------------------------------------------------------------ month repair in multi-region answers
+
+CALENDAR = "Календар сезонів"
+COMPARE_Q = "Порівняй, чим утеплюють рукавички у хвойному лісі та біля річки."
+COMPARE_ROUTE = {"intent": "question", "search_query": "утеплення рукавичок матеріал", "keywords": ["утеплення"]}
+
+
+def _replay(template, corrected=None):
+    from forest_bot.llm import LLMRateLimited
+
+    def answer_fn(messages):
+        if "Знайдено проблеми" in messages[-1]["content"]:
+            if corrected is None:
+                raise LLMRateLimited(30)
+            text = corrected
+        else:
+            text = template
+        for n, t in enumerate(evidence_titles(messages[1]["content"]), start=1):
+            text = text.replace("{" + t + "}", f"[{n}]")
+        return {"status": "answered", "answer": text}
+
+    return answer_fn
+
+
+async def _compare(conversation, template):
+    conversation.llm.route = COMPARE_ROUTE
+    conversation.llm.answer_fn = _replay(template)
+    html = (await conversation.on_text(3, COMPARE_Q))[-1].text
+    body, _, sources = html.partition("<b>Джерела:</b>")
+    return body, sources
+
+
+# Reconstructed from the retest log (qwen/qwen3.8-27b; correction rate-limited): the three November
+# sentences below were flagged and each replaced by the coniferous «Утеплюйте рукавичку в жовтні».
+OBSERVED_COMPARISON = (
+    "**Хвойний ліс:** утеплюють мохом і сухою хвоєю шаром у три лапи, у жовтні {" + CONIFER_INSULATION + "}.\n"
+    "**Біля річки:**\n"
+    "- Біля річки спершу піднімають рукавичку на коріння, а потім утеплюють очеретом (мох біля води гниє), "
+    "дотримуючись загального строку — у листопаді {" + RIVER_INSULATION + "}{" + CALENDAR + "}.\n"
+    "- **Строк:** у місцевій пораді для частини «Біля річки» конкретний місяць не вказано, тому діє загальна "
+    "порада для всього лісу — листопад {" + CALENDAR + "}.\n"
+    "Загальний лісовий календар зазначає листопад як місяць утеплення {" + CALENDAR + "}.")
+
+
+async def test_coniferous_month_is_never_moved_into_the_riverside_section(conversation, archive):
+    body, sources = await _compare(conversation, OBSERVED_COMPARISON)
+    river_part = body.split("Біля річки:")[1]
+    assert "Утеплюйте рукавичку в жовтні" not in body and "У документі сказано" not in body
+    assert "жовтні" not in river_part
+    assert "мохом і сухою хвоєю шаром у три лапи" in body
+    assert "піднімають рукавичку на коріння" in river_part and "очеретом" in river_part
+    assert CONIFER_INSULATION in sources and RIVER_INSULATION in sources
+
+
+async def test_focused_materials_comparison_is_delivered_unchanged(conversation, archive):
+    expected = ("**Хвойний ліс:** мохом і сухою хвоєю, шаром у три лапи {" + CONIFER_INSULATION + "}.\n"
+                "**Біля річки:** рукавичку піднімають на коріння й утеплюють очеретом; мох біля води гниє {"
+                + RIVER_INSULATION + "}.")
+    body, sources = await _compare(conversation, expected)
+    assert "мохом і сухою хвоєю, шаром у три лапи" in body
+    assert "рукавичку піднімають на коріння й утеплюють очеретом; мох біля води гниє" in body
+    assert "жовтні" not in body and "листопаді" not in body
+    assert CONIFER_INSULATION in sources and RIVER_INSULATION in sources and CALENDAR not in sources
+    assert len(conversation.llm.answer_prompts) == 1
+
+
+async def test_two_mittens_with_different_valid_months_are_not_repaired(conversation, archive):
+    # «У соснах» (coniferous: October) vs «Біля бобрової греблі» (river only; no local or river month, so the
+    # forest-wide calendar's November applies). Mitten-level, unambiguous — unlike a whole riverside region,
+    # whose «Під вербою» also follows the deciduous rule (after leaf fall, before the first snow).
+    conversation.llm.route = {"intent": "question", "search_query": "утеплення коли", "keywords": ["утеплення"]}
+    conversation.llm.answer_fn = _replay(
+        "У соснах рукавичку утеплюють у жовтні {" + CONIFER_INSULATION + "}. Біля бобрової греблі місцевого строку "
+        "немає, тож діє календар для всього лісу: рукавички утеплюють у листопаді {" + CALENDAR + "}.")
+    html = (await conversation.on_text(5, "Порівняй, коли утеплюють рукавичку у соснах і біля бобрової греблі."))[-1].text
+    body = html.partition("<b>Джерела:</b>")[0]
+    assert "У соснах рукавичку утеплюють у жовтні" in body
+    assert "Біля бобрової греблі місцевого строку немає, тож діє календар для всього лісу" in body
+    assert "листопаді" in body.split("Біля бобрової греблі")[1]
+    assert len(conversation.llm.answer_prompts) == 1                 # no issue, no correction call
+
+
+async def test_single_place_month_repair_still_works_and_never_repeats_the_quote(conversation, archive):
+    conversation.llm.route = {"intent": "question", "locations": ["u_sosnakh"], "needs_location": False,
+                              "search_query": "утеплення коли чим", "keywords": ["утеплення"]}
+    conversation.llm.answer_fn = _replay(
+        "Рукавички утеплюють у листопаді {" + CALENDAR + "}. Отже, утеплюйте рукавичку в листопаді {" + CALENDAR
+        + "}. Утеплюють мохом і сухою хвоєю шаром у три лапи {" + CONIFER_INSULATION + "}.")
+    html = (await conversation.on_text(4, "Коли й чим утеплювати рукавичку «У соснах»?"))[-1].text
+    body = html.partition("<b>Джерела:</b>")[0]
+    assert "листопаді" not in body
+    assert body.count("Утеплюйте рукавичку в жовтні") == 1
+    assert "мохом і сухою хвоєю шаром у три лапи" in body
