@@ -21,6 +21,7 @@ ARG EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding('${EMBEDDING_MODEL}', cache_dir='/opt/models')"
 
 COPY forest_bot ./forest_bot
+COPY snapshot ./snapshot
 COPY tests ./tests
 COPY pyproject.toml ./
 

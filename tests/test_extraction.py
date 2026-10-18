@@ -5,14 +5,12 @@ import pytest
 from forest_bot.extraction import (ExtractionError, OcrSettings, _numeric_value, _vote_numbers, extract_text,
                                    first_heading, reflow_pdf_text)
 
-from .conftest import FIXTURES
-
-FILES = FIXTURES / "files"
+from .conftest import snapshot_file
 HAS_TESSERACT = shutil.which("tesseract") is not None
 
 
 def test_txt():
-    r = extract_text((FILES / "Членські внески рукавички Під дубом.txt").read_bytes(), "x.txt")
+    r = extract_text(snapshot_file("Членські внески рукавички Під дубом.txt").read_bytes(), "x.txt")
     assert r.method == "text"
     assert "4 жолуді з дорослого звіра на місяць" in r.text
 
@@ -23,13 +21,13 @@ def test_txt_cp1251():
 
 
 def test_docx():
-    r = extract_text((FILES / "Чим поживитись поруч із рукавичкою У ліщині.docx").read_bytes(), "a.docx")
+    r = extract_text(snapshot_file("Чим поживитись поруч із рукавичкою У ліщині.docx").read_bytes(), "a.docx")
     assert r.method == "docx"
     assert "Мед є в дуплі старої липи" in r.text
 
 
 def test_pdf_with_text_layer_is_reflowed():
-    r = extract_text((FILES / "Як кричати, коли бачиш мисливців.pdf").read_bytes(), "a.pdf")
+    r = extract_text(snapshot_file("Як кричати, коли бачиш мисливців.pdf").read_bytes(), "a.pdf")
     assert r.method == "pdf-text"
     assert "Крикни тричі коротко, як Сорока." in r.text
     assert "Не біжи на відкрите. Ховайся в гущавину." in r.text
@@ -37,7 +35,7 @@ def test_pdf_with_text_layer_is_reflowed():
 
 @pytest.mark.skipif(not HAS_TESSERACT, reason="tesseract not installed (runs inside Docker)")
 def test_scanned_pdf_ocr_reads_numbers_correctly():
-    r = extract_text((FILES / "Членські внески рукавички У ліщині.pdf").read_bytes(), "a.pdf")
+    r = extract_text(snapshot_file("Членські внески рукавички У ліщині.pdf").read_bytes(), "a.pdf")
     assert r.method == "pdf-ocr"
     assert "6 горіхів з дорослого звіра на місяць" in r.text
     assert "до 5 числа" in r.text          # texture next to the digit used to produce "95"
@@ -46,7 +44,7 @@ def test_scanned_pdf_ocr_reads_numbers_correctly():
 
 def test_scanned_pdf_without_ocr_fails_cleanly():
     with pytest.raises(ExtractionError) as e:
-        extract_text((FILES / "Членські внески рукавички У ліщині.pdf").read_bytes(), "a.pdf",
+        extract_text(snapshot_file("Членські внески рукавички У ліщині.pdf").read_bytes(), "a.pdf",
                      OcrSettings(enabled=False))
     assert "OCR" in e.value.reason
 

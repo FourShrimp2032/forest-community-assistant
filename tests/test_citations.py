@@ -1,12 +1,11 @@
 """Every factual clause must be backed by the document(s) it cites."""
 
-import json
 from types import SimpleNamespace as N
 
 from forest_bot.qa import render_answer, verify_citations
 from forest_bot.retrieval import QueryScope, RetrievalResult
 
-from .conftest import FIXTURES, KYIV
+from .conftest import KYIV, archive_texts
 
 LOCAL = "Порада для рукавички «Під вербою». Запасний ліхтар зберігається в жовтій скрині на ґанку."
 REGIONAL = "Запасний ліхтар зберігається в зеленій шафі біля дверей."
@@ -53,8 +52,7 @@ def test_rendered_sources_follow_the_corrected_citations(store):
 
 
 def test_real_answers_from_live_runs_are_not_changed():
-    d = {x["filename"].rsplit(".", 1)[0]: x["text"]
-         for x in json.loads((FIXTURES / "archive_texts.json").read_text("utf-8"))}
+    d = {x["filename"].rsplit(".", 1)[0]: x["text"] for x in archive_texts()}
 
     def docs(*titles):
         return [N(text=d[t], document=N(title=t)) for t in titles]

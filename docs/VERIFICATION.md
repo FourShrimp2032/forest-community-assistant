@@ -14,11 +14,13 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Final run (18 Oct 2026): 244 tests pass inside the Docker image (Tesseract included); locally 243 pass
-  and 1 is skipped (the OCR test, which needs Tesseract).
-- They run on the real archive texts (`tests/fixtures/archive_texts.json`, extracted from all 78 files by
-  this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked HTTP layer
-  for the real Groq and Drive clients.
+- Latest run (18 Oct 2026, with the bundled snapshot): 256 tests pass inside the Docker image (Tesseract
+  included); locally 255 pass and 1 is skipped (the OCR test, which needs Tesseract).
+- They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
+  78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
+  HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
+  (`tests/fixtures/`); before removing them, all 78 texts and the 4 sample files were confirmed identical
+  to their snapshot copies.
 - Coverage per file is listed in the README (*Testing*).
 
 ## 2. Google Drive — original archive (17 Oct 2026)
@@ -66,7 +68,9 @@ Notes:
   Both times after a burst of about 40 file downloads within minutes. This is an observation, not a
   documented Google threshold.
 
-## 5. Clean startup (18 Oct 2026)
+## 5. Clean startup without the snapshot (18 Oct 2026)
+
+This check predates the bundled snapshot (section 11); every file came from Drive.
 
 Isolated Compose project `forest-clean`: a fresh copy of the tracked files, empty volumes, and `.env` built
 from `.env.example` with only the documented variables. `TELEGRAM_BOT_TOKEN` was left empty on purpose, so
@@ -169,3 +173,50 @@ Per-request `Timing:` log lines (no message text or keys) on this machine and ne
   occurred when every model was limited, and once a correction call waited 29 s; corrections no longer
   wait for rate limits.
 - These are observations, not guarantees.
+
+## 11. Bundled archive snapshot (18 Oct 2026)
+
+**Building.** `python -m forest_bot snapshot-build --seed-dir <Drive folder download>` in Docker: one live
+listing of the original folder (78 files); every local copy matched Drive's `md5Checksum`, so nothing was
+downloaded; text was extracted by this code (19 DOCX, 21 TXT, 19 PDF text layer, 19 PDF OCR). All 78
+texts are identical to the earlier test fixtures. Snapshot: 78 files, 14 MB, `created_at`
+2026-10-18T15:44:49Z.
+
+**Offline tests** (`tests/test_snapshot.py`, 12 tests):
+- manifest provenance: IDs, names, MIME types, `modifiedTime`, link, SHA-256 and MD5 of every file; no
+  database in the snapshot;
+- fresh import: 78 active Drive documents with the original `modifiedTime` and links; extraction/OCR and
+  the LLM scope classifier are never called (both fail the test if used);
+- Drive listing failure after the import: all 78 stay active; answers carry the "local copy, freshness
+  unverified" notice, and "not found" says the same instead of claiming the whole archive was searched;
+- unchanged listing: 0 downloads, notice gone; a modified file: 1 download, old version `superseded`, new
+  version active with the new time; a deleted file: `removed`;
+- a corrupted bundled file is skipped and later downloaded by the sync;
+- a different (test/custom) folder: nothing imported; existing databases: nothing imported;
+- two restarts after an update, a removal and a withdrawn upload: no re-import, all statuses unchanged;
+- rebuild: reuses verified files, downloads only MD5 mismatches, re-extracts only changed bytes, drops
+  files no longer on Drive.
+
+**Docker, fresh volume, `--network none`** (startup path `build_services` + `startup_checks`, i.e.
+everything before Telegram polling; Telegram itself was not started, to avoid a second poller with the
+production token):
+
+| Run | Ready (78 active documents, index built) | State |
+|---|---|---|
+| fresh volume, first run | 12.4 s after process start | local snapshot, freshness unverified; not "loading" |
+| fresh volume, second run | 7.3 s (≈2 s of it loading the embedding model) | same |
+| restart on the same volume | 2.1 s, import skipped ("already bootstrapped") | same |
+
+These are **local archive readiness** times after process start, on one machine: they exclude the image
+build (and the embedding model download it includes) and the Telegram connection, and they are not a
+startup guarantee for other machines.
+
+The sync attempt without network failed after 15 s (DNS failure, bounded retries); all 78 documents stayed
+active and the state did not change.
+
+**Live Drive listing on top of the snapshot** (same test volume, network on): `listed=78 unchanged=78`,
+0 downloads, and the state switched to verified.
+
+**Not verified live:** sync updates and removals of snapshot-backed records (offline only), and a
+Telegram-connected start with the snapshot (needs a separate test bot). The production bot was not
+changed: it runs on its existing database, where the import is skipped by design.

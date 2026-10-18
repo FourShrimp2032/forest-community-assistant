@@ -79,6 +79,8 @@ class Settings:
     drive_throttle_max_retry_seconds: int = 3600
 
     data_dir: Path = Path("/data")
+    snapshot_dir: Path = Path(__file__).resolve().parent.parent / "snapshot"
+    snapshot_bootstrap: bool = True
     timezone_name: str = "Europe/Kyiv"
 
     embeddings_enabled: bool = True
@@ -145,6 +147,8 @@ class Settings:
                                                   s.drive_throttle_max_retry_seconds)
 
         s.data_dir = Path(_env("DATA_DIR", str(s.data_dir)))
+        s.snapshot_dir = Path(_env("SNAPSHOT_DIR", str(s.snapshot_dir)))
+        s.snapshot_bootstrap = _bool("SNAPSHOT_BOOTSTRAP", s.snapshot_bootstrap)
         s.timezone_name = _env("TIMEZONE", s.timezone_name)
 
         s.embeddings_enabled = _bool("EMBEDDINGS_ENABLED", s.embeddings_enabled)

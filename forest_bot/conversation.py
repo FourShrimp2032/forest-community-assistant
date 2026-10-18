@@ -225,6 +225,14 @@ class Conversation:
         """While the initial archive is incomplete, never imply that the whole archive was searched."""
         from .drive import archive_status
         status = archive_status(self.store, self.archive_sync_enabled)
+        if status.snapshot_unverified:
+            date = status.snapshot_date
+            if result.status == "not_found":
+                text = msg.NOT_FOUND_SNAPSHOT_UNVERIFIED.format(date=date)
+                result.html, result.plain = text, text
+            elif result.status == "answered":
+                result.html = f"{msg.SNAPSHOT_UNVERIFIED.format(date=date)}\n\n{result.html}"
+            return result
         if not status.loading:
             return result
         known = status.listed_once and status.total

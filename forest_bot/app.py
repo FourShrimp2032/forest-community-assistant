@@ -87,6 +87,15 @@ def build_services(settings: Settings) -> Services:
 
 async def startup_checks(services: Services) -> None:
     services.library.recover_interrupted()
+    if services.settings.snapshot_bootstrap:
+        from .snapshot import bootstrap
+        result = await bootstrap(services.store, services.library, services.settings.snapshot_dir,
+                                 services.settings.google_drive_folder_id)
+        if result.imported:
+            log.info("Local archive snapshot ready: %d documents (remote freshness not yet verified)",
+                     result.imported)
+        else:
+            log.info("Bootstrap snapshot not imported: %s", result.skipped)
     await services.library.reindex_missing_embeddings()
     services.retriever.refresh(services.library.revision, force=True)
     if services.llm is not None:

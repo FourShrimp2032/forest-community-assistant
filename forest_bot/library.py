@@ -17,7 +17,7 @@ from typing import Awaitable, Callable
 
 from . import geography as geo
 from . import storage as st
-from .extraction import ExtractionError, OcrSettings, extract_text, extension_of, first_heading
+from .extraction import ExtractedText, ExtractionError, OcrSettings, extract_text, extension_of, first_heading
 from .geography import nfc, normalize
 from .scope import ScopeResult, build_chunks, detect_document_scope
 from .storage import Document, Store, to_iso
@@ -376,10 +376,14 @@ class Library:
 
     # ------------------------------------------------------------------ Google Drive
     async def ingest_drive_file(self, *, file_id: str, name: str, modified_time: str, link: str,
-                                data: bytes | None, error: str | None = None) -> Outcome:
-        """Ingest a new or changed Drive file version (caller checked that it is new/changed)."""
+                                data: bytes | None, error: str | None = None,
+                                extracted: ExtractedText | None = None) -> Outcome:
+        """Ingest a new or changed Drive file version (caller checked that it is new/changed).
+
+        `extracted` lets a caller that already has the text (the bundled archive snapshot) skip extraction
+        and OCR; everything else (scope, identity, versioning, provenance) follows the normal path."""
         outcome = await self._ingest_drive_file(file_id=file_id, name=name, modified_time=modified_time,
-                                                link=link, data=data, error=error)
+                                                link=link, data=data, error=error, extracted=extracted)
         # Older unresolved versions of the same file are obsolete once a newer version was processed.
         for older in self.store.documents_for_drive_file(file_id):
             if older.id < outcome.doc.id and older.status in (st.PENDING_LOCATION, st.FAILED):
@@ -389,7 +393,8 @@ class Library:
         return outcome
 
     async def _ingest_drive_file(self, *, file_id: str, name: str, modified_time: str, link: str,
-                                 data: bytes | None, error: str | None = None) -> Outcome:
+                                 data: bytes | None, error: str | None = None,
+                                 extracted: ExtractedText | None = None) -> Outcome:
         async with self.lock:
             previous = [d for d in self.store.documents_for_drive_file(file_id) if d.status != st.REMOVED]
             prev = previous[-1] if previous else None
@@ -402,10 +407,11 @@ class Library:
                                    previous=prev.id if prev else None)
             if error is not None or data is None:
                 return self._drive_failed(doc, error or "файл не вдалося завантажити")
-            try:
-                extracted = await self.extract(data, name)
-            except ExtractionError as exc:
-                return self._drive_failed(doc, exc.reason)
+            if extracted is None:
+                try:
+                    extracted = await self.extract(data, name)
+                except ExtractionError as exc:
+                    return self._drive_failed(doc, exc.reason)
             title, alt = self.titles_for("drive", name, extracted.text)
             path = self.save_file(doc.id, data, name)
             doc = self.store.update_document(

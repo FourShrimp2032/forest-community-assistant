@@ -7,6 +7,8 @@
     python -m forest_bot docs       list documents (id, source, status, scope, version time, title)
     python -m forest_bot pending    print exactly what /pending shows
     python -m forest_bot search "query" <mitten-code>   retrieval only (no LLM): which active docs are used
+    python -m forest_bot snapshot-build [--out DIR] [--seed-dir DIR ...]
+                                    rebuild the bundled archive snapshot from the Drive API (see README)
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
 from collections import Counter
 
 from .app import build_services, startup_checks
@@ -148,6 +151,30 @@ async def run_search(settings: Settings, query: str, mitten: str) -> int:
         await services.close()
 
 
+async def run_snapshot_build(settings: Settings, args: list[str]) -> int:
+    from .drive import DriveClient
+    from .snapshot import build_snapshot
+    out, seeds, i = settings.snapshot_dir, [], 0
+    while i < len(args):
+        if args[i] == "--out":
+            out = Path(args[i + 1]); i += 2
+        elif args[i] == "--seed-dir":
+            seeds.append(Path(args[i + 1])); i += 2
+        else:
+            print(f"unknown argument {args[i]!r}"); return 2
+    if not settings.google_drive_api_key:
+        print("GOOGLE_DRIVE_API_KEY is required to list the archive"); return 2
+    client = DriveClient(settings.google_drive_api_key, timeout=settings.drive_timeout_seconds,
+                         recursive=settings.drive_recursive)
+    try:
+        manifest = await build_snapshot(client, settings.google_drive_folder_id, out, seeds, settings.ocr,
+                                        settings.drive_download_delay_seconds)
+    finally:
+        await client.close()
+    print(f"snapshot: {manifest['file_count']} files, created_at={manifest['created_at']}, {manifest['_stats']}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     try:
         settings = Settings.from_env()
@@ -168,6 +195,8 @@ def main(argv: list[str]) -> int:
         return asyncio.run(run_docs(settings))
     if command == "pending":
         return asyncio.run(run_pending(settings))
+    if command == "snapshot-build":
+        return asyncio.run(run_snapshot_build(settings, argv[1:]))
     if command == "search" and len(argv) >= 3:
         return asyncio.run(run_search(settings, argv[1], argv[2]))
     print(__doc__)

@@ -250,19 +250,32 @@ class ArchiveStatus:
     listed_once: bool
     total: int
     waiting: int
+    snapshot_date: str | None = None   # set when the local bundled snapshot was imported
 
     @property
     def loading(self) -> bool:
-        return self.enabled and (not self.listed_once or self.waiting > 0)
+        """Documents are still missing (never processed); not the case for a complete local snapshot."""
+        if not self.enabled:
+            return False
+        if not self.listed_once and self.snapshot_date is None:
+            return True
+        return self.waiting > 0
+
+    @property
+    def snapshot_unverified(self) -> bool:
+        """Local snapshot in use, but no successful Drive listing has confirmed it is still current."""
+        return self.snapshot_date is not None and not self.listed_once and not self.loading
 
 
 def archive_status(store: Store, sync_enabled: bool) -> ArchiveStatus:
-    if not sync_enabled:
-        return ArchiveStatus(False, True, 0, 0)
+    from .snapshot import bootstrap_info, snapshot_date
+    snap = snapshot_date(bootstrap_info(store))
     listed_once = store.has_successful_sync()
+    if not sync_enabled:
+        return ArchiveStatus(False, listed_once, 0, 0, snap)
     present = store.drive_files("present")
     waiting = sum(1 for f in present if not f.get("last_processed_modified"))
-    return ArchiveStatus(True, listed_once, len(present), waiting)
+    return ArchiveStatus(True, listed_once, len(present), waiting, snap)
 
 
 class DriveSync:

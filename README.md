@@ -25,19 +25,32 @@ What happens on start, in this order (`forest_bot/__main__.py`):
 1. **Startup checks:**
    - create or open the SQLite database and file store in the volume `forest-data` (`/data`);
    - mark any upload interrupted by a previous restart as failed;
+   - **on an empty database only:** import the bundled snapshot of «Лісовий архів» (see
+     [Bundled archive snapshot](#bundled-archive-snapshot)). This needs no network: the stored text is
+     reused, so nothing is downloaded or OCRed;
    - build the search index;
    - check that the configured Groq models are available.
 
-   These take seconds on an empty database.
+   **Local archive readiness, measured once** (developer's Mac, 18 Oct 2026, Docker, empty volume, no
+   network): the 78 documents were searchable about **7–13 s after process start** (7.3 s and 12.4 s in two
+   fresh runs; 2.1 s after a restart). This excludes the image build and the Telegram connection, and it is
+   an observation on one machine, not a startup guarantee.
 2. **Telegram polling starts.** The bot answers from this point on.
 3. **The first Drive synchronisation starts about 1 s later** as a background job. It does **not** block
-   polling: questions are handled while files are downloaded, and OCR runs in worker threads. Each document
-   becomes usable as soon as it is ingested. A Telegram upload may wait for the Drive file currently
-   being processed, not for the whole sync. Later syncs run every `DRIVE_SYNC_INTERVAL_SECONDS` (10 min)
-   and download only new or changed files.
+   polling. On a snapshot-based installation it normally only lists the folder: unchanged files are not
+   downloaded again, and only new or changed files are downloaded and ingested. Later syncs run every
+   `DRIVE_SYNC_INTERVAL_SECONDS` (10 min).
 
-**While the initial archive is incomplete,** answers use only the documents ingested so far, and the bot
-says so. The state is computed from stored data, with no extra LLM call:
+**Until Drive has been checked,** answers from the snapshot start with «ℹ️ Відповідь ґрунтується на
+локальній копії «Лісового архіву» від 18.10.2026. Чи є на Google Drive новіші зміни, ще не перевірено.»
+That notice disappears after the first successful listing (with Drive sync disabled it stays, since
+freshness is never checked). If Google is unreachable, the bundled documents stay fully usable; only
+changes made on Drive after the snapshot date are missing until a sync succeeds.
+
+**Documents still loading** is a different state. It applies when listed files have never been processed,
+e.g. a file added to Drive after the snapshot whose download Google deferred, or an installation without a
+snapshot. Answers then use only the documents ingested so far, and the bot says so. The state is computed
+from stored data, with no extra LLM call:
 - **an answer was found:** it starts with «⏳ «Лісовий архів» ще завантажується: N із M файлів поки
   недоступні…»;
 - **nothing was found:** the reply is «Серед уже оброблених документів відповіді не знайдено… спробуйте
@@ -48,11 +61,10 @@ processed (their download was deferred). Files that were processed but **rejecte
 `/pending`), and changed files whose previous version is still active, do not trigger the notice. So a
 routine sync on a loaded archive shows nothing.
 
-An uninterrupted first sync of the 78 archive files takes about 3 minutes (2 s pause between downloads).
-**A fresh installation is not guaranteed to be complete within minutes:** Google may temporarily block
-file downloads from one network after a burst of downloads, and the bot then retries with bounded
-backoff. In the clean-start check on 18 Oct the archive was complete about 45 minutes after the start
-(details in [`docs/VERIFICATION.md`](docs/VERIFICATION.md)).
+Without the snapshot (`SNAPSHOT_BOOTSTRAP=false`, a different folder, or an existing database), all files
+come from Drive. Google may then temporarily block downloads from one network after a burst, and the bot
+retries with bounded backoff. In a clean-start check before the snapshot existed, the archive was complete
+about 45 minutes after the start (details in [`docs/VERIFICATION.md`](docs/VERIFICATION.md)).
 
 Data survives `docker compose down` / `up`, restarts and image rebuilds. `docker compose down -v` deletes
 the volume, including uploaded documents and user names. The image contains Tesseract (Ukrainian) and the
@@ -282,6 +294,43 @@ Telegram (long polling) ─► Conversation (dialogue state, context, uploads; S
 5. Pending or unreadable files are reprocessed when their `modifiedTime` changes; the previous valid
    version stays active meanwhile.
 
+Documents imported from the snapshot are ordinary Drive records (same file IDs, `modifiedTime`, checksum
+and links), so all of the above applies to them unchanged.
+
+### Bundled archive snapshot
+
+`snapshot/` holds a copy of the original «Лісовий архів», taken on **18 Oct 2026**:
+- `files/<Drive file ID>.<ext>`: the 78 original files, byte for byte;
+- `manifest.json`: folder ID, snapshot date, and per file the Drive file ID, name, MIME type, original
+  `modifiedTime`, Drive `md5Checksum`, size, link, SHA-256 of the bundled bytes, and the extracted / OCR
+  text with its method.
+
+It contains no Telegram uploads, user names, conversations, credentials or database. The same files are
+used as the test fixtures.
+
+**When it is imported.** Only when all of these hold; otherwise it is ignored with a log line:
+- `GOOGLE_DRIVE_FOLDER_ID` equals the manifest's folder (test and custom folders are never seeded);
+- the database has no documents and no Drive records (existing installations keep their state);
+- no import was recorded before (restarts never re-import, so superseded, withdrawn or removed documents
+  are never restored).
+
+Each file goes through the normal Drive ingestion path with its original `modifiedTime` as the version
+time; the location comes from the document text, without the LLM. A file whose bytes do not match the
+manifest's SHA-256 is skipped and later downloaded by the sync. `SNAPSHOT_BOOTSTRAP=false` disables the
+import.
+
+**Refreshing it** (from the Drive API, never from a runtime database):
+
+```bash
+docker compose run --rm -v "$PWD/snapshot":/app/snapshot bot python -m forest_bot snapshot-build
+```
+
+The command lists the configured folder and reuses a bundled file only if its MD5 equals Drive's
+`md5Checksum`; other files are downloaded (2 s apart) and their text extracted again. Files that are no
+longer on Drive are dropped. `--seed-dir DIR` reuses local copies that pass the same check (the first
+snapshot was built from the Drive folder download, with every file verified this way). If Google blocks
+downloads, the command stops; files fetched so far are kept and reused on the next run.
+
 ### Answer safeguards
 
 These fall into three categories with different strength.
@@ -341,8 +390,8 @@ docker compose run --rm bot python -m pytest -q             # deterministic test
 pip install -r requirements-dev.txt && python -m pytest -q  # locally; the OCR test needs tesseract
 ```
 
-The deterministic tests need no network or credentials. They run on the real archive texts
-(`tests/fixtures/archive_texts.json`), with a fake Drive folder, a fake LLM and a mocked HTTP layer.
+The deterministic tests need no network or credentials. They run on the real archive (the bundled
+`snapshot/`, files and extracted texts), with a fake Drive folder, a fake LLM and a mocked HTTP layer.
 
 | Area | Test files |
 |---|---|
@@ -350,6 +399,8 @@ The deterministic tests need no network or credentials. They run on the real arc
 | extraction and OCR (real scanned PDF in Docker) | `test_extraction.py` |
 | lifecycle, versioning, replacement, withdrawal | `test_versioning.py`, `test_upload_lifecycle.py`, `test_conversation.py` |
 | Drive sync: listing failures, deletion confirmation, throttling, Retry-After, endpoints | `test_drive_sync.py` |
+| archive readiness notices, download error classification | `test_archive_readiness.py` |
+| bundled snapshot: import guards, no OCR, sync on top, restarts, rebuild | `test_snapshot.py` |
 | retrieval and priority | `test_retrieval.py` |
 | routing, follow-ups, dialogue context, customer scenarios | `test_qa.py`, `test_scenarios.py`, `test_dialogue.py` |
 | answer checks and citations | `test_comparisons.py`, `test_citations.py`, `test_answer_polish.py` |
@@ -371,7 +422,10 @@ Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 | Mass-deletion confirmation, failure mid-pagination, single-file download failure, Retry-After | ✅ | — offline only |
 | Google download block and backoff | ✅ | ✅ observed twice; completed after backoff |
 | Clean start: build and missing-token validation | — | ✅ |
-| Clean start: full archive ingestion into an empty database, persistence after restart | ✅ | ✅ (completed ≈45 min after start, after a Google block) |
+| Clean start without snapshot: full archive ingestion into an empty database, persistence after restart | ✅ | ✅ (completed ≈45 min after start, after a Google block) |
+| Snapshot start: empty volume, no network → 78 documents ready, "freshness unverified" state; restart skips the import | ✅ | ✅ Docker, `--network none`: local archive readiness ≈7–13 s after process start (excl. build and Telegram connection; one machine) |
+| Snapshot start, then a real Drive listing: unchanged files not downloaded | ✅ | ✅ one live listing: 78 unchanged, 0 downloads |
+| Snapshot records updated / removed by sync; custom folders not seeded; restart does not restore old versions | ✅ | — offline only |
 | Clean start: Telegram-connected startup on an empty database with the current release | — | ⏳ **not tested** (needs a separate test bot) |
 | Readiness notice while the initial archive is incomplete; oversized files and download-access failures shown in `/pending` (access rechecked automatically); anti-automation 403 kept as a temporary block | ✅ | — offline only (added after the clean-start check) |
 | Telegram upload lifecycle across users: name collection, place clarification, replacement by another user, withdrawal, per-user lists, regional fallback, persistence after restart | ✅ | ✅ manual tests by the developer (logs corroborate replacements and withdrawals) |
@@ -388,12 +442,14 @@ are observations, not guarantees.
 ## Known limitations
 
 - **Fresh installation:**
-  - the first archive sync can be delayed by Google's download protection (not a documented quota), by
-    tens of minutes or more;
-  - meanwhile, answers use only the documents ingested so far, with a notice. The notice is based on
-    stored state: it covers files that are listed but not yet processed, not changed versions of files
-    that are already loaded. Before the first listing completes, the number of files is unknown and the
-    notice says so;
+  - the archive is available immediately from the snapshot of 18 Oct 2026. Changes made on Drive after
+    that date arrive only after a successful sync; during a Google outage or download block they stay
+    unavailable, and the bot says that freshness has not been checked;
+  - files added or changed on Drive after the snapshot are downloaded normally, so they can still be
+    delayed by Google's download protection (not a documented quota);
+  - the "still loading" notice is based on stored state: it covers files that are listed but not yet
+    processed, not changed versions of files that are already loaded;
+  - the snapshot only grows stale; refreshing it is a manual command and a new commit;
   - Telegram-connected startup on an empty database with the current release was not tested.
 - **Drive listings:**
   - listing errors and unfinished pagination are detected and cause no deletions;
@@ -422,7 +478,7 @@ are observations, not guarantees.
 
 ```
 forest_bot/
-  __main__.py      entry point: run | sync | status | docs | pending | search | ask
+  __main__.py      entry point: run | sync | status | docs | pending | search | ask | snapshot-build
   app.py           service wiring and startup checks
   config.py        environment configuration
   geography.py     mitten/region model, place detection
@@ -431,6 +487,7 @@ forest_bot/
   scope.py         document and passage scope; LLM scope validation
   library.py       lifecycle: ingestion, versioning, withdrawal, removal
   drive.py         Drive API client and synchronisation
+  snapshot.py      bundled archive snapshot: guarded import and rebuild
   retrieval.py     geography-aware hybrid retrieval
   embeddings.py    local fastembed model
   textnorm.py      tokenizer and light Ukrainian stemmer
@@ -441,6 +498,7 @@ forest_bot/
   telegram_bot.py  Telegram adapter
   messages.py      Ukrainian texts
   storage.py       SQLite schema and repository
+snapshot/               bundled «Лісовий архів» snapshot (manifest.json + original files)
 scripts/drive_test.sh   isolated live Drive sync checks against a test folder
 tests/                  deterministic tests + tests/live (optional)
 docs/                   REQUIREMENTS.md, PLAN.md, VERIFICATION.md

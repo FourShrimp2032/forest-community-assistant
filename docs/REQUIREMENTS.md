@@ -53,6 +53,12 @@ during implementation). The README describes how each point is implemented.
 - **Drive access:** Drive API with an API key from the developer's own Google Cloud project
   (`GOOGLE_DRIVE_API_KEY`, `GOOGLE_DRIVE_FOLDER_ID`); no OAuth/service account unless a verified limitation
   requires it; no page scraping. Reviewers' willingness to create their own key is not confirmed.
+- **Bundled snapshot (later request):** the original archive files, their extracted/OCR text and a
+  provenance manifest ship with the repository. An empty database for the original folder imports it
+  before serving questions (no repeated OCR, original `modifiedTime` kept); Drive sync then runs in the
+  background and applies only real changes. Never imported for other folders or non-empty databases;
+  restarts never restore older or withdrawn versions. "Local snapshot, freshness not verified" is shown
+  separately from "still loading". Refreshed by a reproducible command from Drive, never from a database.
 - Any Telegram user may upload; uploads are shared with everyone but apply only to their scope.
 
 ## Uploader identity

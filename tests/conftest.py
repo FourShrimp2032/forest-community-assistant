@@ -17,13 +17,25 @@ from forest_bot.qa import QAService
 from forest_bot.retrieval import Retriever
 from forest_bot.storage import Store
 
-FIXTURES = Path(__file__).parent / "fixtures"
+SNAPSHOT = Path(__file__).resolve().parent.parent / "snapshot"
 KYIV = ZoneInfo("Europe/Kyiv")
 ARCHIVE_TS = "2026-10-13T07:30:00+00:00"
 
 
+def _manifest() -> dict:
+    return json.loads((SNAPSHOT / "manifest.json").read_text("utf-8"))
+
+
 def archive_texts() -> list[dict]:
-    return json.loads((FIXTURES / "archive_texts.json").read_text("utf-8"))
+    """The 78 archive documents as extracted by this code (from the bundled snapshot)."""
+    return [{"filename": e["name"], "method": e["extraction_method"], "text": e["text"]}
+            for e in sorted(_manifest()["files"], key=lambda e: e["name"])]
+
+
+def snapshot_file(name: str) -> Path:
+    """Path of an original archive file in the bundled snapshot, by its Drive name."""
+    entry = next(e for e in _manifest()["files"] if e["name"] == name)
+    return SNAPSHOT / entry["file"]
 
 
 def ts(value: str) -> datetime:

@@ -94,6 +94,11 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -379,6 +384,17 @@ class Store:
         fields = {"finished_at": to_iso(utcnow()), "ok": int(ok), "message": message, **counts}
         sets = ", ".join(f"{k} = ?" for k in fields)
         self.conn.execute(f"UPDATE sync_runs SET {sets} WHERE id = ?", [*fields.values(), run_id])
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute("INSERT INTO meta (key, value) VALUES (?, ?) "
+                          "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def count_documents(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
 
     def has_successful_sync(self) -> bool:
         return self.conn.execute("SELECT 1 FROM sync_runs WHERE ok = 1 LIMIT 1").fetchone() is not None
