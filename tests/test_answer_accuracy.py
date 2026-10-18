@@ -192,3 +192,106 @@ def test_wording_recommended_by_the_prompt_passes_the_answer_checks(archive, sto
     rule = next(line for line in ANSWER_SYSTEM.splitlines() if line.startswith("- Пояснюючи"))
     example = re.search(r"«(.+?)»", rule).group(1)
     assert grounding_issues(example[0].upper() + example[1:] + " [1].", docs, False) == []
+
+
+# ------------------------------------------------------------------ retest: ford answer reduced to a fragment
+
+# Reconstructed from the production log of the retest (full text was not recorded): gpt-oss-120b's first
+# answer cited with «【n】». The number check read those as unsupported numbers 1, 4, 3, the correction was
+# rate-limited, and the fallback deleted the three sentences, leaving «Тому, …» as the whole answer.
+# (In production the guests' rule was cited from «Правила співжиття…», which offline keyword-only
+# retrieval does not fetch; the local «Стежки…» document states the same alternative.)
+OBSERVED_DAM_RETEST = (
+    "У вашій рукавичці «Біля бобрової греблі» діє локальне правило, яке забороняє переходити річку вбрід, навіть "
+    "коли гребля відкрита<<" + DAM_PATHS + ">>. Це правило має пріоритет над загальним правилом частини лісу, яке "
+    "дозволяє переходити брід лише за умови відкритої греблі та спалої води<<" + FORDS + ">>. Крім того, для гостей "
+    "встановлено правило переходити лише по греблі<<" + DAM_PATHS + ">>, що також підтверджує заборону вбрід. "
+    "Тому, незважаючи на те, що умови згідно з {" + FORDS + "} виконані, для вашого місця заборона з {" + DAM_PATHS
+    + "} залишається діючою. Отже, перейти вбрід біля бобрової греблі не можна.")
+
+
+def fullwidth(template):
+    """Template with «<<Title>>» rendered as the model's «【n】» citation form."""
+    import re
+
+    def answer_fn(messages):
+        titles = evidence_titles(messages[1]["content"])
+        if "Знайдено проблеми" in messages[-1]["content"]:
+            raise LLMRateLimited(30)
+        text = re.sub(r"<<(.+?)>>", lambda m: f"【{titles.index(m.group(1)) + 1}】", template)
+        for n, t in enumerate(titles, start=1):
+            text = text.replace("{" + t + "}", f"[{n}]")
+        return {"status": "answered", "answer": text}
+
+    return answer_fn
+
+
+async def test_fullwidth_citations_do_not_count_as_numbers_and_the_answer_stays_whole(conversation, archive):
+    conversation.llm.route = DAM_ROUTE
+    conversation.llm.answer_fn = fullwidth(OBSERVED_DAM_RETEST)
+    body, sources = split((await conversation.on_text(1, DAM_Q))[-1].text)
+    assert body.startswith("У вашій рукавичці «Біля бобрової греблі» діє локальне правило")   # not «Тому, …»
+    assert "забороняє переходити річку вбрід" in body and "по греблі" in body and "пріоритет" in body
+    assert "【" not in body and DAM_PATHS in sources
+    assert len(conversation.llm.answer_prompts) == 1                         # nothing to correct
+
+
+async def test_expected_self_contained_dam_answer_is_delivered_unchanged(conversation, archive):
+    expected = (f"Ні. Біля бобрової греблі вбрід не ходять навіть за відкритої греблі — переходити потрібно тільки "
+                f"по греблі {{{DAM_PATHS}}}. Місцева заборона має пріоритет над регіональною порадою {{{DAM_PATHS}}}.")
+    html, calls, _ = await ask(conversation, DAM_Q, DAM_ROUTE, expected)
+    body, sources = split(html)
+    assert len(calls) == 1
+    assert body.startswith("Ні. Біля бобрової греблі вбрід не ходять навіть за відкритої греблі — переходити "
+                           "потрібно тільки по греблі")
+    assert "Місцева заборона має пріоритет над регіональною порадою" in body and DAM_PATHS in sources
+
+
+def test_fallback_does_not_leave_a_dangling_connective(archive, store):
+    from forest_bot.qa import apply_grounding_fallback
+    from forest_bot.retrieval import EvidenceDoc
+    docs = [EvidenceDoc(d, [], {}, 1.0) for d in store.active_documents() if d.title == DAM_PATHS]
+    text = ("Від рукавички до броду 7 кроків [1]. Тому вбрід біля греблі не ходять ніколи [1]. "
+            "На той берег — тільки по греблі [1].")
+    out = apply_grounding_fallback(text, docs, comparison=False)
+    assert out == "Вбрід біля греблі не ходять ніколи [1]. На той берег — тільки по греблі [1]."
+
+
+async def test_router_season_without_a_season_in_the_message_is_ignored(conversation, archive):
+    conversation.llm.route = {**DAM_ROUTE, "context": {"season": "зима"}}     # observed: «вода вже спала»
+    conversation.llm.answer_fn, _ = model(GOOD_DAM)
+    await conversation.on_text(1, DAM_Q)
+    prompt = conversation.llm.answer_prompts[-1]
+    assert not _winter_in_prompt(prompt) and "зима" not in prompt.split("<document>")[0]
+    assert (conversation.store.get_state(1).get("context") or {}).get("season") is None
+
+
+def _winter_in_prompt(prompt):
+    """The established circumstances line precedes the documents in the answer prompt."""
+    head = prompt.split("<document>")[0]
+    return "Обставини користувача" in head and "зима" in head
+
+
+async def test_inherited_question_season_survives_a_follow_up_without_season_words(conversation, archive):
+    conversation.llm.answer_fn, _ = model("Узимку внески вдвічі менші {Членські внески рукавички У соснах}.")
+    conversation.llm.route = {**route("u_sosnakh", "внески узимку", ["внески"]), "context": {"season": "зима"}}
+    await conversation.on_text(7, "Скільки платити у соснах узимку?")
+    assert conversation.store.get_state(7)["context"].get("season") == "зима"
+    # The router repeats the season for the follow-up; the message has no season word, so the router's
+    # value is dropped, but the season inherited from the conversation stays.
+    conversation.llm.route = {**route("pid_yalynoyu", "внески узимку", ["внески"]), "follow_up": True,
+                              "context": {"season": "зима"}}
+    await conversation.on_text(7, "А під ялиною?")
+    assert conversation.store.get_state(7)["context"].get("season") == "зима"
+    assert _winter_in_prompt(conversation.llm.answer_prompts[-1])
+
+
+async def test_explicitly_established_current_season_is_kept_for_later_questions(conversation, archive):
+    conversation.llm.answer_fn, _ = model("Узимку внески вдвічі менші {Членські внески рукавички У соснах}.")
+    conversation.llm.route = {"intent": "statement", "context": {"season": "зима"}}
+    await conversation.on_text(8, "Зараз зима.")
+    assert conversation.store.get_state(8)["context"] == {"season": "зима", "season_scope": "current"}
+    conversation.llm.route = {**route("u_sosnakh", "внески", ["внески"]), "context": {"season": "зима"}}
+    await conversation.on_text(8, "Скільки платити у соснах?")                    # new question, no season word
+    assert conversation.store.get_state(8)["context"].get("season") == "зима"
+    assert _winter_in_prompt(conversation.llm.answer_prompts[-1])

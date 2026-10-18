@@ -254,6 +254,10 @@ def merge_analysis(message: str, det: geo.DetectedLocations, raw: dict | None,
     # "А для зайчика?" changes the subject of this question, not who the user is.
     if not dialogue.is_first_person(message) or hypothetical:
         llm_context.pop("identity", None)
+    if llm_context.get("season") and not (any(re.search(p, geo.normalize(message)) for p in dialogue.SEASONS.values())
+                                          or _MONTH.search(geo.normalize(message))):
+        # «вода вже спала» is not winter: a season must be stated in the message itself.
+        log.info("Router season %r ignored: no season or month in the message", llm_context.pop("season"))
     if llm_context.get("season"):
         llm_context.setdefault("season_scope", "question")   # the router cannot promote a season to "current"
     stated = dialogue.merge({}, llm_context, dialogue.extract(message))
@@ -1008,8 +1012,18 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
             if any(q in geo.normalize(other) for other in _sentences_of(text) if other != s):
                 bad.add(s)
     kept_lines = []
+    previous_removed = True                  # the answer's first sentence has no antecedent either
     for line in text.split("\n"):
-        parts = [neutral.get(p, p) for p in re.split(r"(?<=[.!?])\s+", line) if p not in bad]
+        parts = []
+        for p in re.split(r"(?<=[.!?])\s+", line):
+            if p in bad:
+                previous_removed = True
+                continue
+            p = neutral.get(p, p)
+            if previous_removed:
+                p = _drop_dangling_connective(p)
+            parts.append(p)
+            previous_removed = False
         if any(p.strip() for p in parts) or not line.strip():
             kept_lines.append(" ".join(parts))
     for kind, s, msg in issues:
@@ -1026,6 +1040,19 @@ def apply_grounding_fallback(text: str, docs: list[EvidenceDoc], comparison: boo
         if not has_conclusion:
             result += "\n\n" + NO_AFFORDABILITY_CONCLUSION
     return result
+
+
+_CONNECTIVE = re.compile(r"^(\W*)(?:тому|отже|отож|відтак|таким\s+чином|тож|крім\s+того|також|однак|проте|"
+                         r"але|при\s+цьому|водночас|зате)\b\s*,?\s*", re.I)
+
+
+def _drop_dangling_connective(sentence: str) -> str:
+    """«Тому, незважаючи на…» after its antecedent was removed -> «Незважаючи на…»."""
+    m = _CONNECTIVE.match(sentence)
+    if not m or not sentence[m.end():]:
+        return sentence
+    rest = sentence[m.end():]
+    return m.group(1) + rest[0].upper() + rest[1:]
 
 
 NO_AFFORDABILITY_CONCLUSION = ("Визначити, де дешевше, за цими документами неможливо: внески мають різні одиниці "
@@ -1077,7 +1104,9 @@ def parse_answer_text(text: str | None) -> dict | None:
         answer = re.split(r"(?im)^\W*СТАТУС\W*:.*$", text)[-1]
         if re.match(r"(?is)^\W*НОТАТКИ", answer):
             return None   # truncated inside the notes: nothing usable for the user
-    return {"status": status, "answer": answer.strip()}
+    # Citations must look like [n] before any check runs: «【3】» read as the number 3 made the number
+    # check delete correct sentences.
+    return {"status": status, "answer": clean_model_text(answer)}
 
 
 def clean_model_text(text: str) -> str:

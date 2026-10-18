@@ -14,8 +14,9 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, after the answer-error fixes in section 12): 265 tests pass inside the Docker
-  image (Tesseract included); locally 264 pass and 1 is skipped (the OCR test, which needs Tesseract).
+- Latest run (18 Oct 2026, after the answer-error fixes and the ford retest fix in section 12): 271 tests
+  pass inside the Docker image (Tesseract included); locally 270 pass and 1 is skipped (the OCR test, which
+  needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -243,7 +244,7 @@ for measures, override explanations and multi-part questions. Across 64 sample p
 topics) the conflict hints went from 12 to 14: only the real October/November insulation conflicts were
 added.
 
-**Tests:** `tests/test_answer_accuracy.py` (9 tests) runs the full answer path on the real archive with a
+**Tests:** `tests/test_answer_accuracy.py` (15 tests, incl. the retest below) runs the full answer path on the real archive with a
 fake model that **replays the observed outputs** (and expected correct ones) and checks the final answer
 and its sources. These replays show how retrieval, prompts and post-processing now handle those outputs;
 **they do not establish live answer quality**, which depends on the models and varies between runs. The
@@ -251,4 +252,29 @@ answers that were correct in the same session (willow stones, hedgehog in Novemb
 raspberries) are replayed as well and pass unchanged.
 
 **Not guarded deterministically:** invented application wording such as «рівномірно по всій поверхні»
-(prompt rule only). **Pending:** manual retest of the three questions on the deployed bot.
+(prompt rule only).
+
+**Manual retest (developer, 18 Oct 2026, after deploying `443638b`):** insulation passed (October, moss and
+dry needles, «шаром у три лапи», coniferous source); head, treasurer and winter recipient passed. The ford
+answer had the correct prohibition and no invented distinction, but was a fragment starting with «Тому, …»
+and without the alternative «only via the dam».
+
+**Ford retest diagnosis — caused by post-processing.** From the log: gpt-oss-120b answered (router
+gpt-oss-20b). Its first answer cited sources as «【n】»; citations were normalised to «[n]» only when
+rendering, after the checks, so the number check read 1, 4 and 3 as numbers found in no document and
+flagged three sentences (the local prohibition, the priority explanation, and the rule to cross only by the
+dam). The correction was rate-limited on all models, and the fallback deleted the three sentences. Only
+the first 120 characters of flagged sentences are logged; **the full intermediate texts were not recorded**.
+The same log shows the router setting the season «зима» for this question («вода вже спала»); that only
+widened the search query.
+
+**Fixes:** citations are normalised when the answer is parsed, before any check; a season from the router
+is ignored unless the message itself names a season or month (a season inherited from the conversation or
+established as current, e.g. «Зараз зима.», is kept; tested offline); when the fallback deletes a
+sentence, a following sentence that opens with a connective («Тому», «Отже», «Крім того»…) loses it. That
+is a **cosmetic cleanup, not a guarantee of semantic coherence**: the remaining text may still refer to
+what was deleted. The main fix is that the correct sentences are no longer deleted. Regression tests replay the reconstructed first answer (logged sentence beginnings,
+«【n】» form, surviving fragment) and check the final answer: whole, starting with the prohibition, with the
+alternative and the priority explanation, local source cited. This replay fails without the citation fix.
+The expected answer («Ні. … тільки по греблі … Місцева заборона має пріоритет…») passes unchanged; the
+insulation and multi-part replays are unchanged. **Pending:** manual retest of the ford question.
