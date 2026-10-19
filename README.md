@@ -1,525 +1,540 @@
+[English](README.en.md) | **Українська**
+
 # Лісовий помічник — Forest Community Document Assistant
 
-A Telegram bot for the fictional animal communities of the forest. Each «рукавичка» (mitten) is a separate
-homeowners' association (ОСМД). The bot answers questions from shared documents and shows their sources.
-It understands geographic scope (mitten → forest region → whole forest), accepts new documents over
-Telegram, synchronises the Google Drive archive «Лісовий архів», and manages document versions.
+Telegram-бот для вигаданих громад лісових звірів. Кожна «рукавичка» — окреме об'єднання співвласників
+(ОСМД). Бот відповідає на питання за спільними документами й показує їхні джерела. Він враховує
+географію (рукавичка → частина лісу → увесь ліс), приймає нові документи через Telegram, синхронізує
+архів Google Drive «Лісовий архів» і керує версіями документів.
 
-User-facing messages are in Ukrainian. See also:
+Повідомлення для користувачів — українською. Див. також:
 
-- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md): the agreed behaviour;
-- [`docs/PLAN.md`](docs/PLAN.md): the implementation plan;
-- [`docs/VERIFICATION.md`](docs/VERIFICATION.md): dated verification evidence.
+- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md): погоджена поведінка;
+- [`docs/PLAN.md`](docs/PLAN.md): план реалізації;
+- [`docs/VERIFICATION.md`](docs/VERIFICATION.md): датовані результати перевірок.
 
 ---
 
-## Quick start
+## Швидкий старт
 
 ```bash
-cp .env.example .env        # fill TELEGRAM_BOT_TOKEN, GROQ_API_KEY, GOOGLE_DRIVE_API_KEY (see Credentials)
+cp .env.example .env        # заповніть TELEGRAM_BOT_TOKEN, GROQ_API_KEY, GOOGLE_DRIVE_API_KEY (див. «Облікові дані»)
 docker compose up --build
 ```
 
-What happens on start, in this order (`forest_bot/__main__.py`):
+Що відбувається під час запуску, у такому порядку (`forest_bot/__main__.py`):
 
-1. **Startup checks:**
-   - create or open the SQLite database and file store in the volume `forest-data` (`/data`);
-   - mark any upload interrupted by a previous restart as failed;
-   - **on an empty database only:** import the bundled snapshot of «Лісовий архів» (see
-     [Bundled archive snapshot](#bundled-archive-snapshot)). This needs no network: the stored text is
-     reused, so nothing is downloaded or OCRed;
-   - build the search index;
-   - check that the configured Groq models are available.
+1. **Стартові перевірки:**
+   - створюється або відкривається база SQLite і сховище файлів у томі `forest-data` (`/data`);
+   - завантаження, перерване попереднім перезапуском, позначається як невдале;
+   - **лише для порожньої бази:** імпортується вбудований знімок «Лісового архіву» (див.
+     [Вбудований знімок архіву](#вбудований-знімок-архіву)). Мережа для цього не потрібна: збережений
+     текст використовується повторно, тож нічого не завантажується й не розпізнається через OCR;
+   - будується пошуковий індекс;
+   - перевіряється, чи доступні налаштовані моделі Groq.
 
-   **Local archive readiness, measured once** (developer's Mac, 18 Oct 2026, Docker, empty volume, no
-   network): the 78 documents were searchable about **7–13 s after process start** (7.3 s and 12.4 s in two
-   fresh runs; 2.1 s after a restart). This excludes the image build and the Telegram connection, and it is
-   an observation on one machine, not a startup guarantee.
-2. **Telegram polling starts.** The bot answers from this point on.
-3. **The first Drive synchronisation starts about 1 s later** as a background job. It does **not** block
-   polling. On a snapshot-based installation it normally only lists the folder: unchanged files are not
-   downloaded again, and only new or changed files are downloaded and ingested. Later syncs run every
-   `DRIVE_SYNC_INTERVAL_SECONDS` (10 min).
+   **Готовність локального архіву, виміряна один раз** (Mac розробника, 18.10.2026, Docker, порожній том,
+   без мережі): 78 документів були доступні для пошуку приблизно **через 7–13 с після запуску процесу**
+   (7,3 с і 12,4 с у двох запусках «з нуля»; 2,1 с після перезапуску). Це без збирання образу й без
+   підключення до Telegram; це спостереження на одній машині, а не гарантія часу запуску.
+2. **Запускається опитування Telegram (polling).** З цього моменту бот відповідає.
+3. **Перша синхронізація з Drive починається приблизно через 1 с** як фонове завдання. Вона **не**
+   блокує опитування. На встановленні зі знімком вона зазвичай лише отримує список файлів теки: незмінені
+   файли повторно не завантажуються, завантажуються й обробляються лише нові або змінені. Наступні
+   синхронізації — кожні `DRIVE_SYNC_INTERVAL_SECONDS` (10 хв).
 
-**Until Drive has been checked,** answers from the snapshot start with «ℹ️ Відповідь ґрунтується на
+**Доки Drive не перевірено,** відповіді за знімком починаються з «ℹ️ Відповідь ґрунтується на
 локальній копії «Лісового архіву» від 18.10.2026. Чи є на Google Drive новіші зміни, ще не перевірено.»
-That notice disappears after the first successful listing (with Drive sync disabled it stays, since
-freshness is never checked). If Google is unreachable, the bundled documents stay fully usable; only
-changes made on Drive after the snapshot date are missing until a sync succeeds.
+Це повідомлення зникає після першого успішного отримання списку файлів (якщо синхронізацію з Drive
+вимкнено, воно лишається, бо актуальність ніколи не перевіряється). Якщо Google недоступний, вбудовані
+документи повністю придатні до використання; бракує лише змін, зроблених на Drive після дати знімка, доки
+синхронізація не вдасться.
 
-**Documents still loading** is a different state. It applies when listed files have never been processed,
-e.g. a file added to Drive after the snapshot whose download Google deferred, or an installation without a
-snapshot. Answers then use only the documents ingested so far, and the bot says so. The state is computed
-from stored data, with no extra LLM call:
-- **an answer was found:** it starts with «⏳ «Лісовий архів» ще завантажується: N із M файлів поки
+**«Документи ще завантажуються»** — інший стан. Він настає, коли файли зі списку ще жодного разу не
+оброблено: наприклад, файл додано на Drive після знімка, а Google відклав його завантаження, або
+встановлення без знімка. Тоді відповіді спираються лише на вже оброблені документи, і бот про це
+повідомляє. Стан обчислюється зі збережених даних, без додаткового виклику LLM:
+- **відповідь знайдено:** вона починається з «⏳ «Лісовий архів» ще завантажується: N із M файлів поки
   недоступні…»;
-- **nothing was found:** the reply is «Серед уже оброблених документів відповіді не знайдено… спробуйте
-  трохи пізніше», never the plain "not found in the documents".
+- **нічого не знайдено:** відповідь — «Серед уже оброблених документів відповіді не знайдено… спробуйте
+  трохи пізніше», а не просто «у документах не знайдено».
 
-"Incomplete" means that no successful listing has finished yet, or that listed files have never been
-processed (their download was deferred). Files that were processed but **rejected** (shown in
-`/pending`), and changed files whose previous version is still active, do not trigger the notice. So a
-routine sync on a loaded archive shows nothing.
+«Неповний» означає, що жодне отримання списку ще не завершилося успішно, або що файли зі списку ще
+жодного разу не оброблено (їх завантаження відкладено). Файли, які оброблено, але **відхилено** (показані в
+`/pending`), і змінені файли, попередня версія яких досі чинна, цього повідомлення не викликають. Тож
+звичайна синхронізація вже завантаженого архіву нічого не показує.
 
-Without the snapshot (`SNAPSHOT_BOOTSTRAP=false`, a different folder, or an existing database), all files
-come from Drive. Google may then temporarily block downloads from one network after a burst, and the bot
-retries with bounded backoff. In a clean-start check before the snapshot existed, the archive was complete
-about 45 minutes after the start (details in [`docs/VERIFICATION.md`](docs/VERIFICATION.md)).
+Без знімка (`SNAPSHOT_BOOTSTRAP=false`, інша тека або вже наповнена база) усі файли надходять із Drive.
+Тоді Google може тимчасово блокувати завантаження з однієї мережі після серії запитів, і бот повторює
+спроби з обмеженою затримкою. У перевірці запуску «з нуля», проведеній ще до появи знімка, архів був
+повним приблизно через 45 хвилин після старту (подробиці — у [`docs/VERIFICATION.md`](docs/VERIFICATION.md)).
 
-Data survives `docker compose down` / `up`, restarts and image rebuilds. `docker compose down -v` deletes
-the volume, including uploaded documents and user names. The image contains Tesseract (Ukrainian) and the
-embedding model, both installed at build time. `.env` is excluded from the image.
+Дані зберігаються після `docker compose down` / `up`, перезапусків і перезбирання образу.
+`docker compose down -v` видаляє том разом із завантаженими документами та іменами користувачів. Образ
+містить Tesseract (українська мова) і модель ембедингів — обидва встановлюються під час збирання. `.env`
+до образу не потрапляє.
 
 ---
 
-## Credentials
+## Облікові дані
 
-| Variable | Required | How to get it |
+| Змінна | Обов'язкова | Як отримати |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | yes | Telegram → [@BotFather](https://t.me/BotFather) → `/newbot` → name and a username ending in `bot` → copy the token. Without it the container exits with «TELEGRAM_BOT_TOKEN is not set». Never let two processes poll with the same token; use a separate bot for testing. |
-| `GROQ_API_KEY` | yes | <https://console.groq.com/keys> → *Create API Key*. |
-| `GOOGLE_DRIVE_API_KEY` | for archive sync | See below. Without it the bot runs, but the archive is not synchronised (a warning is logged). |
+| `TELEGRAM_BOT_TOKEN` | так | Telegram → [@BotFather](https://t.me/BotFather) → `/newbot` → назва та ім'я користувача, що закінчується на `bot` → скопіюйте токен. Без нього контейнер завершує роботу з повідомленням «TELEGRAM_BOT_TOKEN is not set». Ніколи не запускайте два процеси опитування з тим самим токеном; для тестів використовуйте окремого бота. |
+| `GROQ_API_KEY` | так | <https://console.groq.com/keys> → *Create API Key*. |
+| `GOOGLE_DRIVE_API_KEY` | для синхронізації архіву | Див. нижче. Без нього бот працює, але архів не синхронізується (у журнал пишеться попередження). |
 
-Never commit `.env`; it is in `.gitignore`. `.env.example` contains only empty placeholders.
+Ніколи не комітьте `.env`; він є в `.gitignore`. `.env.example` містить лише порожні заповнювачі.
 
-### Google Drive (API key)
+### Google Drive (ключ API)
 
-The archive is read with the **Google Drive API v3 and an API key**. An API key can read files shared as
-"Anyone with the link"; no OAuth, no service account, no page scraping.
+Архів читається через **Google Drive API v3 із ключем API**. Ключ API може читати файли, до яких надано
+доступ «Усі, хто має посилання»; без OAuth, без сервісного облікового запису, без парсингу сторінок.
 
-1. <https://console.cloud.google.com/> → create or select a project (billing not required).
+1. <https://console.cloud.google.com/> → створіть або виберіть проєкт (оплата не потрібна).
 2. *APIs & Services → Library →* **Google Drive API** → **Enable**.
-3. *APIs & Services → Credentials → **+ Create credentials** → **API key***. Do not use the "Help me choose"
-   wizard: it creates OAuth clients or service accounts.
-4. Recommended: *API restrictions → Restrict key →* **Google Drive API**.
-5. Put it into `.env` as `GOOGLE_DRIVE_API_KEY=...`. `GOOGLE_DRIVE_FOLDER_ID` defaults to the original
-   archive; the folder must stay shared as *Anyone with the link → Viewer*.
+3. *APIs & Services → Credentials → **+ Create credentials** → **API key***. Не користуйтеся майстром
+   «Help me choose»: він створює клієнти OAuth або сервісні облікові записи.
+4. Рекомендовано: *API restrictions → Restrict key →* **Google Drive API**.
+5. Запишіть його в `.env` як `GOOGLE_DRIVE_API_KEY=...`. `GOOGLE_DRIVE_FOLDER_ID` за замовчуванням
+   вказує на оригінальний архів; тека має лишатися відкритою як *Anyone with the link → Viewer*.
 
-> **Setup requirement:** reviewers need their own Google Cloud API key, created as above, or the developer
-> must supply one. Whether reviewers are willing to create a key has **not** been confirmed.
+> **Вимога до налаштування:** рецензентам потрібен власний ключ API Google Cloud, створений, як описано
+> вище, або ключ має надати розробник. Чи готові рецензенти створити ключ, **не** підтверджено.
 
-### Groq models
+### Моделі Groq
 
-| Variable | Default | Purpose |
+| Змінна | За замовчуванням | Призначення |
 |---|---|---|
-| `GROQ_MODEL` | `openai/gpt-oss-120b` | writes the answers |
-| `GROQ_ROUTER_MODEL` | `openai/gpt-oss-20b` | understands the question and classifies unclear document locations |
-| `GROQ_FALLBACK_MODELS` | `qwen/qwen3.8-27b,openai/gpt-oss-20b` | used while a model is rate-limited; `none` disables |
-| `GROQ_REASONING_EFFORT` / `GROQ_ANSWER_REASONING_EFFORT` | `low` / `medium` | gpt-oss reasoning effort for routing / answers |
-| `GROQ_FALLBACK_WAIT_SECONDS` | `2` | longest wait on a limited model while another one is available |
-| `REQUEST_BUDGET_SECONDS` | `45` | time budget per question, including retries and rate-limit waits |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | пише відповіді |
+| `GROQ_ROUTER_MODEL` | `openai/gpt-oss-20b` | розбирає питання й класифікує неясне розташування документів |
+| `GROQ_FALLBACK_MODELS` | `qwen/qwen3.8-27b,openai/gpt-oss-20b` | використовуються, поки модель обмежена лімітом запитів; `none` вимикає |
+| `GROQ_REASONING_EFFORT` / `GROQ_ANSWER_REASONING_EFFORT` | `low` / `medium` | рівень міркувань gpt-oss для маршрутизації / відповідей |
+| `GROQ_FALLBACK_WAIT_SECONDS` | `2` | найдовше очікування на обмежену модель, коли доступна інша |
+| `REQUEST_BUDGET_SECONDS` | `45` | ліміт часу на одне питання, включно з повторами й очікуванням лімітів |
 
-Defaults were chosen from Groq's free-tier model list and confirmed available with real keys on 17–18 Oct
-2026. **Rate limits differ by account, plan and model and can change.** See
-<https://console.groq.com/docs/rate-limits>. As dated observations for our free-tier keys:
+Значення за замовчуванням вибрано зі списку моделей безкоштовного тарифу Groq; їхню доступність
+підтверджено реальними ключами 17–18.10.2026. **Ліміти запитів залежать від облікового запису, тарифу й
+моделі та можуть змінюватися.** Див. <https://console.groq.com/docs/rate-limits>. Датовані спостереження
+для наших ключів безкоштовного тарифу:
 
-- 8,000 tokens per minute and 1,000 requests per day per model;
-- `gpt-oss-120b` reached a 200,000 tokens-per-day limit.
+- 8 000 токенів на хвилину і 1 000 запитів на день на модель;
+- `gpt-oss-120b` досягла ліміту 200 000 токенів на день.
 
-One question used roughly 1K router tokens plus 4–6K answer tokens, so a daily quota of that size covers
-very roughly 30–50 answers per model. That figure depends on the questions, the documents retrieved and
-the corrections needed. When a model is rate-limited, the fallback models are used automatically.
-**Sustained load may exceed the capacity of the free tier.** At startup the bot logs an error if a
-configured model is not available to the key. Groq has no embedding endpoint; embeddings are computed
-locally.
+Одне питання використовувало приблизно 1K токенів маршрутизатора плюс 4–6K токенів відповіді, тож денна
+квота такого розміру покриває дуже приблизно 30–50 відповідей на модель. Ця цифра залежить від питань,
+знайдених документів і потрібних виправлень. Коли модель обмежена лімітом, автоматично використовуються
+резервні моделі. **Тривале навантаження може перевищити можливості безкоштовного тарифу.** Під час запуску
+бот записує в журнал помилку, якщо налаштована модель недоступна для ключа. Groq не має ендпоінта для
+ембедингів; ембединги обчислюються локально.
 
-Other settings (sync interval, download pause and backoff, deletion confirmation threshold, upload and PDF
-limits, OCR confidence, prompt budget, timezone) are listed with comments in
-[`.env.example`](.env.example).
-
----
-
-## Supported formats and OCR
-
-- **Accepted:** `.pdf`, `.docx`, `.txt` (UTF-8 or CP1251); on Drive also Google Docs (exported as text).
-- **Not accepted:** legacy `.doc`, photos and images, other formats. Telegram uploaders get a message;
-  unsupported Drive files are listed in `/pending`.
-- **OCR:** PDF pages without a usable text layer are rendered at 300 dpi and read with Tesseract (`ukr`).
-  - Several preprocessing variants are OCRed. The text comes from the most confident variant, and each
-    number is decided by a confidence-weighted vote across variants.
-  - Pages below `OCR_MIN_CONFIDENCE` are rejected, so the document is not used.
-  - OCR can still misread text.
-- **Unusable files** are not used:
-  - Telegram: the uploader is told why;
-  - Drive: unreadable, empty, password-protected, too many pages, failed OCR, or unsupported format →
-    listed in `/pending` with the reason;
-  - Drive files larger than the download limit (25 MB) are rejected and listed in `/pending`; they are
-    retried when the file changes.
-  - **Download-access failures** (permission, credential or not-found errors, recognised from the response)
-    are also listed in `/pending`, but rechecked automatically at bounded intervals (1 h, 2 h, 4 h … up to
-    24 h), even if the file does not change.
-  - Temporary failures (Google's anti-automation page, Drive rate-limit reasons, 429, 5xx, network) leave
-    the file waiting and are retried with backoff.
-  - The previous valid version stays active in every case.
+Інші налаштування (інтервал синхронізації, пауза між завантаженнями й затримка повторів, поріг
+підтвердження видалень, ліміти завантажень і PDF, впевненість OCR, бюджет промпту, часовий пояс) наведено
+з коментарями в [`.env.example`](.env.example).
 
 ---
 
-## Using the bot
+## Підтримувані формати й OCR
 
-Questions and uploads need no commands.
+- **Приймаються:** `.pdf`, `.docx`, `.txt` (UTF-8 або CP1251); на Drive також Google Docs (експортуються
+  як текст).
+- **Не приймаються:** застарілий `.doc`, фото й зображення, інші формати. Ті, хто надсилає через Telegram,
+  отримують повідомлення; непідтримувані файли з Drive перелічено в `/pending`.
+- **OCR:** сторінки PDF без придатного текстового шару рендеряться з роздільністю 300 dpi й читаються
+  Tesseract (`ukr`).
+  - Розпізнається кілька варіантів попередньої обробки. Текст береться з найвпевненішого варіанта, а
+    кожне число визначається голосуванням між варіантами, зваженим за впевненістю.
+  - Сторінки з впевненістю нижче `OCR_MIN_CONFIDENCE` відхиляються, тож документ не використовується.
+  - OCR усе одно може помилятися.
+- **Непридатні файли** не використовуються:
+  - Telegram: тому, хто надіслав, пояснюють причину;
+  - Drive: нечитабельні, порожні, захищені паролем, із забагатьма сторінками, з невдалим OCR або в
+    непідтримуваному форматі → перелічені в `/pending` із причиною;
+  - файли Drive, більші за ліміт завантаження (25 МБ), відхиляються й перелічуються в `/pending`; їх
+    обробляють повторно, коли файл змінюється.
+  - **Помилки доступу під час завантаження** (дозволи, облікові дані або «не знайдено», розпізнані з
+    відповіді) теж перелічуються в `/pending`, але автоматично перевіряються повторно з обмеженими
+    інтервалами (1 год, 2 год, 4 год … до 24 год), навіть якщо файл не змінюється.
+  - Тимчасові збої (сторінка Google проти автоматизованих запитів, причини лімітів Drive, 429, 5xx,
+    мережа) лишають файл в очікуванні й повторюються із затримкою.
+  - Попередня чинна версія в усіх випадках лишається активною.
 
-**Questions:**
+---
 
-- **Examples:**
+## Користування ботом
+
+Для питань і завантажень команди не потрібні.
+
+**Питання:**
+
+- **Приклади:**
   - «Скільки внесок під дубом і до якого числа?»
   - «Біля греблі мисливці! Як кричати?»
   - «Що їсти в листяному лісі?»
   - «Порівняй внески під дубом і у соснах»
-- **Follow-ups:** «і до якого числа?», «а кому віддавати?», «а у соснах?». A message that only names a new
-  place keeps the latest requested detail.
-- **Circumstances:**
-  - «я дорослий борсук» or «зараз зима» is remembered until changed or `/reset`;
-  - a season named inside a question applies to that question and its follow-ups only;
-  - hypothetical wording («якби…», «уявімо…») is not stored.
-- **Missing place:** if one is needed, the bot asks with buttons (8 mittens + «Увесь ліс").
-- **Sources:** answers end with **Джерела**, built from stored records:
-  - Drive: title, «Лісовий архів», file link, place;
-  - Telegram: title, the uploader's real name, Kyiv receipt time, place, and a 📎 button for the file
-    («Документ відкликано» after withdrawal).
+- **Уточнення:** «і до якого числа?», «а кому віддавати?», «а у соснах?». Повідомлення, яке лише називає
+  нове місце, зберігає останню запитану деталь.
+- **Обставини:**
+  - «я дорослий борсук» чи «зараз зима» запам'ятовується, доки не зміниться або до `/reset`;
+  - сезон, названий у питанні, діє лише для цього питання та його уточнень;
+  - гіпотетичні формулювання («якби…», «уявімо…») не зберігаються.
+- **Не вказано місце:** якщо воно потрібне, бот перепитує з кнопками (8 рукавичок + «Увесь ліс").
+- **Джерела:** відповіді закінчуються розділом **Джерела**, побудованим зі збережених записів:
+  - Drive: назва, «Лісовий архів», посилання на файл, місце;
+  - Telegram: назва, справжнє ім'я того, хто надіслав, час отримання за Києвом, місце і кнопка 📎 для
+    файлу («Документ відкликано» після відкликання).
 
-**Uploading (PDF, DOCX or TXT as a file):**
+**Завантаження (PDF, DOCX або TXT як файл):**
 
-1. First upload: the bot asks for your **real name**; the upload waits. The name is stored against your
-   Telegram user ID. Questions never require a name.
-2. Text is extracted, with OCR for scans. Unreadable files are reported and not used.
-3. The place is taken from the title or an audience sentence. If it is unclear, you are asked (several
-   mittens or regions, or «Увесь ліс"). The document is not used until you answer.
-4. If it is unclear whether the upload replaces an existing document, you are asked «Замінює» / «Окремий
-   документ».
+1. Перше завантаження: бот питає ваше **справжнє ім'я**; завантаження чекає. Ім'я зберігається за вашим
+   ідентифікатором користувача Telegram. Для питань ім'я ніколи не потрібне.
+2. Текст витягується, для сканів — через OCR. Про нечитабельні файли повідомляється, і вони не
+   використовуються.
+3. Місце визначається з назви або речення про адресатів. Якщо воно неясне, вас перепитують (кілька
+   рукавичок чи частин лісу або «Увесь ліс"). Доки ви не відповісте, документ не використовується.
+4. Якщо неясно, чи замінює завантаження наявний документ, вас питають «Замінює» / «Окремий документ».
 
-| Telegram command | What it does |
+| Команда Telegram | Що робить |
 |---|---|
-| `/start`, `/help` | purpose, examples, mitten list |
-| `/reset` | clears conversation, place and circumstances (documents and name are kept) |
-| `/pending` | Drive documents needing clarification or unreadable: title, link, reason (paginated) |
-| `/my_documents` | your uploads with status; «Відкликати» → confirmation → withdrawn (paginated) |
+| `/start`, `/help` | призначення, приклади, список рукавичок |
+| `/reset` | очищує розмову, місце й обставини (документи та ім'я зберігаються) |
+| `/pending` | документи з Drive, що потребують уточнення або нечитабельні: назва, посилання, причина (посторінково) |
+| `/my_documents` | ваші завантаження зі статусом; «Відкликати» → підтвердження → відкликано (посторінково) |
 
-**Command-line tools** (`docker compose run --rm bot python -m forest_bot <command>`, no Telegram):
+**Інструменти командного рядка** (`docker compose run --rm bot python -m forest_bot <command>`, без Telegram):
 
-| Command | Purpose |
+| Команда | Призначення |
 |---|---|
-| `sync` | one Drive synchronisation with a per-file report |
-| `status` / `docs` | document counts / every version with status, scope, version time |
-| `pending` | the text `/pending` would show |
-| `search "query" <mitten-code>` | retrieval only (no LLM) |
-| `ask "question"` | one answer (uses Groq) |
+| `sync` | одна синхронізація з Drive зі звітом по кожному файлу |
+| `status` / `docs` | кількість документів / кожна версія зі статусом, місцем, часом версії |
+| `pending` | текст, який показала б `/pending` |
+| `search "query" <mitten-code>` | лише пошук (без LLM) |
+| `ask "question"` | одна відповідь (використовує Groq) |
 
-`scripts/drive_test.sh` runs these against a separate Drive test folder in an isolated Compose project.
-It refuses the original archive's folder ID.
+`scripts/drive_test.sh` запускає ці команди для окремої тестової теки Drive в ізольованому проєкті Compose.
+Ідентифікатор теки оригінального архіву він відхиляє.
 
 ---
 
-## How it works
+## Як це працює
 
 ```
-Telegram (long polling) ─► Conversation (dialogue state, context, uploads; SQLite)
+Telegram (long polling) ─► Conversation (стан розмови, контекст, завантаження; SQLite)
           │                                   │
           ▼                                   ▼
-  QAService: router LLM + deterministic   Library: extraction/OCR, scope detection,
-  place/context detection                 versioning, withdrawal, removal
-          │                                   ▲
+  QAService: LLM-маршрутизатор +          Library: витягання тексту/OCR, визначення місця,
+  детерміноване визначення місця          версії, відкликання, видалення
+  й контексту                                 ▲
+          │                                   │
           ▼                                   │
-  Retriever: active chunks only,          DriveSync (background job: startup + every N min;
-  geography filter, BM25 + embeddings     Drive API v3 + API key)
+  Retriever: лише активні фрагменти,      DriveSync (фонове завдання: під час запуску + кожні
+  фільтр за географією, BM25 + ембединги  N хв; Drive API v3 + ключ API)
           │
           ▼
-  answer LLM (Groq) → best-effort answer checks → sources rendered from DB records
+  LLM відповіді (Groq) → перевірки відповідей → джерела зі записів бази даних
 ```
 
-| Concern | Choice |
+| Аспект | Рішення |
 |---|---|
-| Storage | SQLite (WAL) + original files on the `/data` volume |
-| Telegram | python-telegram-bot 22, long polling, private chats |
-| Extraction | pypdf, python-docx, UTF-8/CP1251 text, Tesseract OCR |
-| Retrieval | geography filter → BM25 (light Ukrainian stemming) + fastembed `paraphrase-multilingual-MiniLM-L12-v2` |
-| LLM | Groq: `gpt-oss-120b` (answers), `gpt-oss-20b` (routing), fallbacks |
+| Зберігання | SQLite (WAL) + оригінальні файли на томі `/data` |
+| Telegram | python-telegram-bot 22, long polling, приватні чати |
+| Витягання тексту | pypdf, python-docx, текст UTF-8/CP1251, Tesseract OCR |
+| Пошук | фільтр за географією → BM25 (легкий український стемінг) + fastembed `paraphrase-multilingual-MiniLM-L12-v2` |
+| LLM | Groq: `gpt-oss-120b` (відповіді), `gpt-oss-20b` (маршрутизація), резервні моделі |
 
-### Geography and priority
+### Географія та пріоритет
 
-- The mitten → region mapping is in `forest_bot/geography.py`, separate from documents. «Під вербою»
-  belongs to «Листяний ліс» and «Біля річки»; «На узліссі» to none.
-- Documents and individual **passages** have scopes; a section headed with a place gets that place's
-  scope.
-- For a mitten, only passages for that mitten, its regions or the whole forest are offered to the model.
-  This filter is enforced in code.
-- **Priority:** on a conflicting point, the more specific advice applies and the broader one is said not to
-  apply there. Complementary broader advice is still given. A mitten document and a broader document about
-  the same subject (word overlap) are flagged to the model as a potential conflict. Equal-specificity
-  conflicts are shown with both sources.
+- Відповідність «рукавичка → частина лісу» задано у `forest_bot/geography.py`, окремо від документів.
+  «Під вербою» належить до «Листяний ліс» і «Біля річки»; «На узліссі» — до жодної.
+- Документи й окремі **фрагменти** мають свою сферу застосування; розділ із заголовком-місцем отримує
+  сферу цього місця.
+- Для рукавички моделі пропонуються лише фрагменти для цієї рукавички, її частин лісу або всього лісу.
+  Цей фільтр забезпечено в коді.
+- **Пріоритет:** у суперечливому пункті діє конкретніша порада, а про ширшу сказано, що там вона не діє.
+  Ширші доповнювальні поради все одно наводяться. Документ рукавички й ширший документ про той самий
+  предмет (збіг слів) позначаються для моделі як можливий конфлікт. Конфлікти однакової конкретності
+  показуються з обома джерелами.
 
-### Document lifecycle (enforced in code)
+### Життєвий цикл документа (забезпечено в коді)
 
-| Status | Used in answers | Meaning |
+| Статус | Використовується у відповідях | Значення |
 |---|---|---|
-| `awaiting_name` / `processing` | no | Telegram upload waiting for the name / being processed |
-| `pending_location` | no | place unclear (Telegram: asking the sender; Drive: in `/pending`) |
-| `pending_replacement` | no | Telegram: waiting for «Замінює / Окремий» |
-| `failed` | no | unsupported or unreadable (Drive: in `/pending` with reason) |
-| `active` | **yes** | current version |
-| `superseded` | no | replaced by a newer version of the same logical document |
-| `withdrawn` | no | withdrawn by its uploader (Telegram user ID checked) |
-| `removed` | no | file confirmed deleted from the Drive archive |
-| `duplicate` | no | identical content already known |
+| `awaiting_name` / `processing` | ні | завантаження з Telegram чекає на ім'я / обробляється |
+| `pending_location` | ні | місце неясне (Telegram: питаємо того, хто надіслав; Drive: у `/pending`) |
+| `pending_replacement` | ні | Telegram: чекаємо «Замінює / Окремий» |
+| `failed` | ні | непідтримуваний або нечитабельний (Drive: у `/pending` із причиною) |
+| `active` | **так** | чинна версія |
+| `superseded` | ні | замінений новішою версією того самого логічного документа |
+| `withdrawn` | ні | відкликаний тим, хто його надіслав (перевіряється ідентифікатор користувача Telegram) |
+| `removed` | ні | видалення файлу з архіву Drive підтверджено |
+| `duplicate` | ні | такий самий вміст уже є |
 
-- **Version time:** Drive `modifiedTime` or Telegram receipt time, never download time (UTC, shown in
-  `TIMEZONE`).
-- **Replacement:** a newer version of the same Drive file; or the same title and scope from any source
-  or uploader; or an explicit update statement naming an existing title. The new version must be
-  **later** in each case.
-- **Ambiguous identity:** Telegram uploads get a question; on Drive both documents stay active.
-- **Not a replacement:** same topic and place alone. Identical content creates no new version.
-- **No automatic restore:** withdrawal or removal never reactivates older versions.
-- **History:** every document keeps a decision history.
+- **Час версії:** `modifiedTime` на Drive або час отримання в Telegram, ніколи не час завантаження (UTC,
+  показується в `TIMEZONE`).
+- **Заміна:** новіша версія того самого файлу Drive; або та сама назва й сфера застосування з будь-якого
+  джерела від будь-кого; або явне повідомлення про оновлення з назвою наявного документа. У кожному разі
+  нова версія має бути **пізнішою**.
+- **Неоднозначна тотожність:** для завантажень із Telegram ставиться питання; на Drive обидва документи
+  лишаються активними.
+- **Не заміна:** лише та сама тема й місце. Ідентичний вміст не створює нової версії.
+- **Без автоматичного відновлення:** відкликання чи видалення ніколи не повертає старіші версії.
+- **Історія:** кожен документ зберігає історію рішень.
 
-### Drive synchronisation
+### Синхронізація з Drive
 
-1. List the folder recursively, all pages. **A listing error, or a page request that fails before
-   pagination finishes, aborts the sync without changes.**
-2. Skip unchanged files (same `modifiedTime` and checksum).
-3. Download new or changed files through the official API:
-   - `files.get?alt=media`, or `files/{id}/export` for Google Docs, with the API key;
-   - transient 429/5xx: at most 4 attempts. A `Retry-After` up to 30 s is waited in full; a longer one
-     defers the request, and no sync contacts Google before that time;
-   - errors are classified from the response, not by status code alone:
-     - Google's HTML anti-automation page and Drive rate-limit reasons are **temporary**, even when sent
-       as HTTP 403. They stop downloads for that run, keep completed downloads, and retry with bounded
-       exponential backoff (5, 10, 20, 40 min, then hourly; reset after a clean sync);
-     - permission, credential or not-found errors are **access** failures: the file is rejected for now
-       and rechecked at 1 h, 2 h … 24 h intervals.
-4. Files missing from a successful listing are marked `removed`. If more than
-   `DRIVE_MAX_DELETE_FRACTION` of known files (and more than 3 files) are missing at once:
-   - the removal is first confirmed by a second listing; files missing from both are removed, whatever
-     their number, and files that reappear are kept;
-   - if the confirmation listing fails, nothing is removed, and the check repeats on the next sync.
-5. Pending or unreadable files are reprocessed when their `modifiedTime` changes; the previous valid
-   version stays active meanwhile.
+1. Отримати список файлів теки рекурсивно, усі сторінки. **Помилка отримання списку або запит сторінки,
+   що не вдався до завершення пагінації, перериває синхронізацію без змін.**
+2. Пропустити незмінені файли (той самий `modifiedTime` і контрольна сума).
+3. Завантажити нові або змінені файли через офіційний API:
+   - `files.get?alt=media` або `files/{id}/export` для Google Docs, із ключем API;
+   - тимчасові 429/5xx: щонайбільше 4 спроби. `Retry-After` до 30 с очікується повністю; довший
+     відкладає запит, і жодна синхронізація не звертається до Google раніше цього часу;
+   - помилки класифікуються за вмістом відповіді, а не лише за кодом статусу:
+     - HTML-сторінка Google проти автоматизованих запитів і причини лімітів Drive — **тимчасові**,
+       навіть якщо надходять як HTTP 403. Вони зупиняють завантаження в цьому запуску, зберігають уже
+       завершені завантаження й повторюються з обмеженою експоненційною затримкою (5, 10, 20, 40 хв, далі
+       щогодини; скидається після чистої синхронізації);
+     - помилки дозволів, облікових даних або «не знайдено» — помилки **доступу**: файл поки що
+       відхиляється й перевіряється повторно з інтервалами 1 год, 2 год … 24 год.
+4. Файли, яких немає в успішно отриманому списку, позначаються як `removed`. Якщо одночасно бракує більше
+   ніж `DRIVE_MAX_DELETE_FRACTION` відомих файлів (і більше ніж 3 файлів):
+   - видалення спершу підтверджується другим отриманням списку; файли, яких немає в обох, видаляються,
+     хоч скільки їх, а файли, що з'явилися знову, зберігаються;
+   - якщо підтвердне отримання списку не вдалося, нічого не видаляється, і перевірка повторюється під час
+     наступної синхронізації.
+5. Файли, що чекають уточнення або нечитабельні, обробляються повторно, коли змінюється їхній
+   `modifiedTime`; попередня чинна версія тим часом лишається активною.
 
-Documents imported from the snapshot are ordinary Drive records (same file IDs, `modifiedTime`, checksum
-and links), so all of the above applies to them unchanged.
+Документи, імпортовані зі знімка, — звичайні записи Drive (ті самі ідентифікатори файлів, `modifiedTime`,
+контрольна сума й посилання), тож усе наведене вище стосується їх без змін.
 
-### Bundled archive snapshot
+### Вбудований знімок архіву
 
-`snapshot/` holds a copy of the original «Лісовий архів», taken on **18 Oct 2026**:
-- `files/<Drive file ID>.<ext>`: the 78 original files, byte for byte;
-- `manifest.json`: folder ID, snapshot date, and per file the Drive file ID, name, MIME type, original
-  `modifiedTime`, Drive `md5Checksum`, size, link, SHA-256 of the bundled bytes, and the extracted / OCR
-  text with its method.
+`snapshot/` містить копію оригінального «Лісового архіву», зроблену **18.10.2026**:
+- `files/<Drive file ID>.<ext>`: 78 оригінальних файлів, байт у байт;
+- `manifest.json`: ідентифікатор теки, дата знімка, а для кожного файлу — ідентифікатор файлу Drive,
+  назва, тип MIME, оригінальний `modifiedTime`, `md5Checksum` із Drive, розмір, посилання, SHA-256
+  вбудованих байтів і витягнутий / розпізнаний OCR текст разом зі способом витягання.
 
-It contains no Telegram uploads, user names, conversations, credentials or database. The same files are
-used as the test fixtures.
+Він не містить завантажень із Telegram, імен користувачів, розмов, облікових даних чи бази даних. Ці самі
+файли використовуються як тестові дані.
 
-**When it is imported.** Only when all of these hold; otherwise it is ignored with a log line:
-- `GOOGLE_DRIVE_FOLDER_ID` equals the manifest's folder (test and custom folders are never seeded);
-- the database has no documents and no Drive records (existing installations keep their state);
-- no import was recorded before (restarts never re-import, so superseded, withdrawn or removed documents
-  are never restored).
+**Коли його імпортують.** Лише коли виконуються всі ці умови; інакше його пропускають із записом у журнал:
+- `GOOGLE_DRIVE_FOLDER_ID` збігається з текою в маніфесті (тестові й власні теки ніколи не наповнюються
+  знімком);
+- у базі немає документів і записів Drive (наявні встановлення зберігають свій стан);
+- імпорт раніше не записувався (перезапуски ніколи не імпортують повторно, тож замінені, відкликані чи
+  видалені документи ніколи не відновлюються).
 
-Each file goes through the normal Drive ingestion path with its original `modifiedTime` as the version
-time; the location comes from the document text, without the LLM. A file whose bytes do not match the
-manifest's SHA-256 is skipped and later downloaded by the sync. `SNAPSHOT_BOOTSTRAP=false` disables the
-import.
+Кожен файл проходить звичайний шлях обробки файлів Drive з оригінальним `modifiedTime` як часом версії;
+місце визначається з тексту документа, без LLM. Файл, байти якого не збігаються із SHA-256 у маніфесті,
+пропускається й пізніше завантажується синхронізацією. `SNAPSHOT_BOOTSTRAP=false` вимикає імпорт.
 
-**Refreshing it** (from the Drive API, never from a runtime database):
+**Оновлення знімка** (з Drive API, ніколи з робочої бази даних):
 
 ```bash
 docker compose run --rm -v "$PWD/snapshot":/app/snapshot bot python -m forest_bot snapshot-build
 ```
 
-The command lists the configured folder and reuses a bundled file only if its MD5 equals Drive's
-`md5Checksum`; other files are downloaded (2 s apart) and their text extracted again. Files that are no
-longer on Drive are dropped. `--seed-dir DIR` reuses local copies that pass the same check (the first
-snapshot was built from the Drive folder download, with every file verified this way). If Google blocks
-downloads, the command stops; files fetched so far are kept and reused on the next run.
+Команда отримує список файлів налаштованої теки й повторно використовує вбудований файл, лише якщо його
+MD5 збігається з `md5Checksum` на Drive; інші файли завантажуються (з інтервалом 2 с), і їхній текст
+витягується заново. Файли, яких на Drive більше немає, вилучаються. `--seed-dir DIR` повторно використовує
+локальні копії, що проходять ту саму перевірку (перший знімок зібрано з завантаженої теки Drive, і кожен
+файл перевірено саме так). Якщо Google блокує завантаження, команда зупиняється; уже отримані файли
+зберігаються й використовуються під час наступного запуску.
 
-### Answer safeguards
+### Запобіжники відповідей
 
-These fall into three categories with different strength.
+Вони поділяються на три категорії різної надійності.
 
-**Enforced in code (deterministic):**
-- which documents are eligible (status and geography);
-- ownership checks for withdrawal;
-- version timestamps;
-- source metadata: titles, links, uploader names and times always come from stored records, never from
-  model output.
+**Забезпечено в коді (детерміновано):**
+- які документи допускаються (статус і географія);
+- перевірка власника під час відкликання;
+- часові позначки версій;
+- метадані джерел: назви, посилання, імена тих, хто надіслав, і час завжди беруться зі збережених
+  записів, а не з виводу моделі.
 
-**Intended model behaviour (prompt rules):**
-- answer only from the provided documents, in Ukrainian;
-- treat document text as data, not instructions;
-- priority and conflict handling;
-- complete but focused answers, covering every part of a multi-part question;
-- measures and units exactly as in the source, no added how-to steps;
-- an override explained as the priority of the more specific place, without invented distinctions;
-- no unsupported comparisons.
+**Очікувана поведінка моделі (правила промпту):**
+- відповідати лише за наданими документами, українською;
+- сприймати текст документів як дані, а не інструкції;
+- обробка пріоритетів і конфліктів;
+- повні, але зосереджені відповіді, що охоплюють кожну частину складеного питання;
+- міри й одиниці точно як у джерелі, без доданих інструкцій «як робити»;
+- перевагу пояснюють пріоритетом конкретнішого місця, без вигаданих відмінностей;
+- без необґрунтованих порівнянь.
 
-The model is instructed accordingly but can deviate. In particular, text inside documents cannot be
-guaranteed never to influence it.
+Модель отримує відповідні інструкції, але може від них відхилятися. Зокрема, не можна гарантувати, що
+текст усередині документів ніколи на неї не вплине.
 
-**Best-effort answer checks (heuristics):** applied after the model answers. They use lexical evidence
-(word overlap and patterns), not semantic verification, so they reduce rather than eliminate unsupported
-statements.
+**Перевірки відповідей за принципом «найкращих зусиль» (евристики):** застосовуються після відповіді
+моделі. Вони спираються на лексичні ознаки (збіг слів і шаблони), а не на смислову перевірку, тож
+зменшують, а не усувають необґрунтовані твердження.
 
-- **Deterministic repairs:**
-  - remove claims about "other documents";
-  - restore the source's recipient form («Синиці в кошик»);
-  - remove season remarks unrelated to any document.
-- **Conflict hints:** sentences of a more specific and a broader document about the same subject are
-  marked in the prompt, including short ones with different months or a prohibition vs a conditional
-  permission.
-- **Detectors for typical errors.** One correction request (which never waits for a rate limit), then
-  removal or neutral replacement of sentences that still fail; a changed measure or a broader month is
-  replaced by the cited source sentence instead of being deleted. After a removal, a dangling opening
-  connective («Тому», «Отже») is dropped; this is cosmetic and does not guarantee a coherent answer.
-  - absence stated as fact;
-  - invented ownership;
-  - dropped conditions such as «до року»;
-  - a rule named for one animal restated without it or turned into a prohibition;
-  - obligations inferred from silence;
-  - numbers found in no source;
-  - a measure turned into another unit or count, or declared unspecified although the source gives it;
-  - a broader document's month where a more specific document sets another;
-  - a contrast between two forms of the same word («брід» / «вбрід») that no document makes;
-  - unsupported "cheaper" conclusions;
-  - an ignored seasonal rule.
-- **Citation check per clause:**
-  - citations whose document shares none of the clause's distinctive words are dropped;
-  - a document sharing at least two otherwise uncited distinctive words is added.
+- **Детерміновані виправлення:**
+  - вилучення тверджень про «інші документи»;
+  - відновлення форми отримувача з джерела («Синиці в кошик»);
+  - вилучення згадок про сезон, не пов'язаних із жодним документом.
+- **Підказки про конфлікти:** речення конкретнішого й ширшого документа про той самий предмет позначаються
+  в промпті, зокрема короткі — з різними місяцями або із забороною проти умовного дозволу.
+- **Детектори типових помилок.** Один запит на виправлення (який ніколи не чекає на ліміт запитів), потім
+  вилучення або нейтральна заміна речень, що досі не проходять перевірку; змінена міра або місяць ширшого
+  документа замінюються процитованим реченням джерела, а не вилучаються. Після вилучення відкритий на
+  початку речення сполучник («Тому», «Отже») прибирається; це косметика, вона не гарантує зв'язної
+  відповіді.
+  - відсутність, подана як факт;
+  - вигадане володіння;
+  - пропущені умови на кшталт «до року»;
+  - правило, назване для одного звіра, повторене без нього або перетворене на заборону;
+  - обов'язки, виведені з мовчання документа;
+  - числа, яких немає в жодному джерелі;
+  - міра, перетворена на іншу одиницю чи кількість, або оголошена невказаною, хоча джерело її дає;
+  - місяць ширшого документа там, де конкретніший документ встановлює інший;
+  - протиставлення двох форм того самого слова («брід» / «вбрід»), якого не робить жоден документ;
+  - необґрунтовані висновки «дешевше»;
+  - проігнороване сезонне правило.
+- **Перевірка посилань для кожної частини речення:**
+  - посилання на документ, що не має жодного з характерних слів цієї частини, вилучаються;
+  - документ, що має щонайменше два характерні слова, які інакше лишилися б без посилання, додається.
 
-  This catches clear cross-document misattributions; it does not prove that each clause is semantically
-  supported.
+  Це виявляє явні помилки приписування до іншого документа; це не доводить, що кожна частина смислово
+  підтверджена.
 
-**Failures:** each question has a time budget. If all models are rate-limited, the user is told to try
-again shortly; API errors give a "technical problem" message. Neither is presented as "not found in the
-documents".
+**Збої:** кожне питання має ліміт часу. Якщо всі моделі обмежені лімітом запитів, користувачеві пропонують
+спробувати трохи згодом; помилки API дають повідомлення про «технічну помилку». Жоден із цих випадків не
+подається як «у документах не знайдено».
 
 ---
 
-## Testing
+## Тестування
 
 ```bash
-docker compose run --rm bot python -m pytest -q             # deterministic tests, incl. real OCR
-pip install -r requirements-dev.txt && python -m pytest -q  # locally; the OCR test needs tesseract
+docker compose run --rm bot python -m pytest -q             # детерміновані тести, зокрема реальний OCR
+pip install -r requirements-dev.txt && python -m pytest -q  # локально; тесту OCR потрібен tesseract
 ```
 
-The deterministic tests need no network or credentials. They run on the real archive (the bundled
-`snapshot/`, files and extracted texts), with a fake Drive folder, a fake LLM and a mocked HTTP layer.
+Детерміновані тести не потребують мережі чи облікових даних. Вони працюють на реальному архіві
+(вбудований `snapshot/`, файли й витягнуті тексти), з фіктивною текою Drive, фіктивною LLM і
+підробленим HTTP-рівнем.
 
-| Area | Test files |
+| Сфера | Файли тестів |
 |---|---|
-| geography, place detection, document and passage scope | `test_geography.py`, `test_scope.py` |
-| extraction and OCR (real scanned PDF in Docker) | `test_extraction.py` |
-| lifecycle, versioning, replacement, withdrawal | `test_versioning.py`, `test_upload_lifecycle.py`, `test_conversation.py` |
-| Drive sync: listing failures, deletion confirmation, throttling, Retry-After, endpoints | `test_drive_sync.py` |
-| archive readiness notices, download error classification | `test_archive_readiness.py` |
-| bundled snapshot: import guards, no OCR, sync on top, restarts, rebuild | `test_snapshot.py` |
-| retrieval and priority | `test_retrieval.py` |
-| routing, follow-ups, dialogue context, customer scenarios | `test_qa.py`, `test_scenarios.py`, `test_dialogue.py` |
-| answer checks and citations | `test_comparisons.py`, `test_citations.py`, `test_answer_polish.py` |
-| Telegram HTML payload: entities, bold, angle brackets | `test_rendering.py` |
-| target vs cited places, same-place hints, month repair in comparisons | `test_place_reference.py` |
-| requested aspects, month citations, claim-level measure check | `test_scope_attribution.py` |
-| replays of observed answer errors (fake model outputs) | `test_answer_accuracy.py` |
-| Groq client, fallbacks, rate limits, time budget | `test_llm.py`, `test_rate_limits.py` |
+| географія, визначення місця, сфера застосування документів і фрагментів | `test_geography.py`, `test_scope.py` |
+| витягання тексту й OCR (реальний сканований PDF у Docker) | `test_extraction.py` |
+| життєвий цикл, версії, заміна, відкликання | `test_versioning.py`, `test_upload_lifecycle.py`, `test_conversation.py` |
+| синхронізація з Drive: збої отримання списку, підтвердження видалень, обмеження швидкості, Retry-After, ендпоінти | `test_drive_sync.py` |
+| повідомлення про готовність архіву, класифікація помилок завантаження | `test_archive_readiness.py` |
+| вбудований знімок: умови імпорту, без OCR, синхронізація поверх, перезапуски, перезбирання | `test_snapshot.py` |
+| пошук і пріоритет | `test_retrieval.py` |
+| маршрутизація, уточнення, контекст розмови, сценарії замовника | `test_qa.py`, `test_scenarios.py`, `test_dialogue.py` |
+| перевірки відповідей і посилань | `test_comparisons.py`, `test_citations.py`, `test_answer_polish.py` |
+| HTML-вміст повідомлень Telegram: сутності, жирний шрифт, кутові дужки | `test_rendering.py` |
+| запитані й згадані як джерело місця, підказки для того самого місця, виправлення місяців у порівняннях | `test_place_reference.py` |
+| запитані аспекти, посилання щодо місяців, перевірка мір на рівні тверджень | `test_scope_attribution.py` |
+| відтворення спостережених помилок відповідей (вивід фіктивної моделі) | `test_answer_accuracy.py` |
+| клієнт Groq, резервні моделі, ліміти запитів, ліміт часу | `test_llm.py`, `test_rate_limits.py` |
 
-Optional live tests (`-m live`, need keys, consume Groq quota): `tests/live/test_live_drive.py`,
+Необов'язкові живі тести (`-m live`, потребують ключів, витрачають квоту Groq): `tests/live/test_live_drive.py`,
 `tests/live/test_live_groq.py`.
 
 ---
 
-## Verification summary
+## Підсумок перевірок
 
-Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
+Датовані подробиці — у [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 
-| Area | Offline tests | Live evidence |
+| Сфера | Офлайн-тести | Живі підтвердження |
 |---|---|---|
-| Drive listing, download, extraction of the original archive | ✅ | ✅ scripted live test (3/3) |
-| Drive add / update / unclear place / clarification / listing failure / removal (A–F) | ✅ | ✅ scripted, separate test folder |
-| Mass-deletion confirmation, failure mid-pagination, single-file download failure, Retry-After | ✅ | — offline only |
-| Google download block and backoff | ✅ | ✅ observed twice; completed after backoff |
-| Clean start: build and missing-token validation | — | ✅ |
-| Clean start without snapshot: full archive ingestion into an empty database, persistence after restart | ✅ | ✅ (completed ≈45 min after start, after a Google block) |
-| Snapshot start: empty volume, no network → 78 documents ready, "freshness unverified" state; restart skips the import | ✅ | ✅ Docker, `--network none`: local archive readiness ≈7–13 s after process start (excl. build and Telegram connection; one machine) |
-| Snapshot start, then a real Drive listing: unchanged files not downloaded | ✅ | ✅ one live listing: 78 unchanged, 0 downloads |
-| Snapshot records updated / removed by sync; custom folders not seeded; restart does not restore old versions | ✅ | — offline only |
-| Clean start: Telegram-connected startup on an empty database with the current release | — | ⏳ **not tested** (needs a separate test bot) |
-| Readiness notice while the initial archive is incomplete; oversized files and download-access failures shown in `/pending` (access rechecked automatically); anti-automation 403 kept as a temporary block | ✅ | — offline only (added after the clean-start check) |
-| Telegram upload lifecycle across users: name collection, place clarification, replacement by another user, withdrawal, per-user lists, regional fallback, persistence after restart | ✅ | ✅ manual tests by the developer (logs corroborate replacements and withdrawals) |
-| Version ordering across Drive and Telegram (`modifiedTime` vs receipt time) | ✅ | — offline only |
-| Questions, follow-ups, context, comparisons, missing information | ✅ (fake LLM) | ✅ real models and manual Telegram tests; **full live suite not re-run after the latest answer-check changes** |
-| Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ✅ all three passed a manual retest (ford after a further fix); replays do not establish live answer quality |
-| Fixes for the 18 Oct evening batch (false premise «40», citation, applicability) | ✅ replays of reconstructed outputs | ✅ false premise, citation and the riverside suggestion passed a manual retest; materials comparison passed a manual retest after the citation, measure and aspect fixes |
-| Rate-limit fallback | ✅ | ✅ observed when a daily quota ran out |
+| Отримання списку, завантаження й витягання тексту оригінального архіву з Drive | ✅ | ✅ скриптовий живий тест (3/3) |
+| Drive: додавання / оновлення / неясне місце / уточнення / збій отримання списку / видалення (A–F) | ✅ | ✅ скриптово, окрема тестова тека |
+| Підтвердження масового видалення, збій посеред пагінації, збій завантаження одного файлу, Retry-After | ✅ | — лише офлайн |
+| Блокування завантажень Google і затримка повторів | ✅ | ✅ спостерігалося двічі; завершилося після затримки |
+| Запуск «з нуля»: збирання й перевірка відсутнього токена | — | ✅ |
+| Запуск «з нуля» без знімка: повне завантаження архіву в порожню базу, збереження після перезапуску | ✅ | ✅ (завершилося ≈45 хв після старту, після блокування Google) |
+| Запуск зі знімка: порожній том, без мережі → 78 документів готові, стан «актуальність не перевірено»; перезапуск пропускає імпорт | ✅ | ✅ Docker, `--network none`: готовність локального архіву ≈7–13 с після запуску процесу (без збирання й підключення до Telegram; одна машина) |
+| Запуск зі знімка, потім реальне отримання списку з Drive: незмінені файли не завантажуються | ✅ | ✅ одне живе отримання списку: 78 незмінених, 0 завантажень |
+| Записи зі знімка оновлюються / видаляються синхронізацією; власні теки не наповнюються знімком; перезапуск не відновлює старі версії | ✅ | — лише офлайн |
+| Запуск «з нуля»: запуск з підключенням до Telegram на порожній базі з поточною версією | — | ⏳ **не перевірено** (потрібен окремий тестовий бот) |
+| Повідомлення про готовність, поки початковий архів неповний; завеликі файли й помилки доступу під час завантаження показуються в `/pending` (доступ перевіряється повторно автоматично); 403 проти автоматизованих запитів вважається тимчасовим блокуванням | ✅ | — лише офлайн (додано після перевірки запуску «з нуля») |
+| Життєвий цикл завантажень із Telegram для різних користувачів: збір імені, уточнення місця, заміна іншим користувачем, відкликання, списки кожного користувача, регіональні поради як запасний варіант, збереження після перезапуску | ✅ | ✅ ручні тести розробника (журнали підтверджують заміни й відкликання) |
+| Порядок версій між Drive і Telegram (`modifiedTime` проти часу отримання) | ✅ | — лише офлайн |
+| Питання, уточнення, контекст, порівняння, відсутня інформація | ✅ (фіктивна LLM) | ✅ реальні моделі й ручні тести в Telegram; **повний живий набір тестів не запускався повторно після останніх змін у перевірках відповідей** |
+| Виправлення за ручними знахідками 18.10 (брід, утеплення, голова/скарбник) | ✅ відтворення спостереженого виводу з фіктивною моделлю | ✅ усі три пройшли ручну повторну перевірку (брід — після додаткового виправлення); відтворення не доводять якості живих відповідей |
+| Виправлення за вечірньою серією 18.10 (хибна передумова «40», посилання, застосовність) | ✅ відтворення реконструйованого виводу | ✅ хибна передумова, посилання й порада біля річки пройшли ручну повторну перевірку; порівняння матеріалів пройшло ручну повторну перевірку після виправлень посилань, мір і аспектів |
+| Перехід на резервні моделі через ліміти | ✅ | ✅ спостерігалося, коли закінчилася денна квота |
 
-**Observed latency** (18 Oct, this machine and network, free-tier keys): 1.3–2.8 s per question when
-not rate-limited, about 5 s when a correction call was made, and longer waits under rate limiting. These
-are observations, not guarantees.
+**Спостережувана затримка** (18.10, ця машина й мережа, ключі безкоштовного тарифу): 1,3–2,8 с на питання
+без обмежень лімітів, близько 5 с, коли робився виклик виправлення, і довше очікування під час обмежень.
+Це спостереження, а не гарантії.
 
 ---
 
-## Known limitations
+## Відомі обмеження
 
-- **Fresh installation:**
-  - the archive is available immediately from the snapshot of 18 Oct 2026. Changes made on Drive after
-    that date arrive only after a successful sync; during a Google outage or download block they stay
-    unavailable, and the bot says that freshness has not been checked;
-  - files added or changed on Drive after the snapshot are downloaded normally, so they can still be
-    delayed by Google's download protection (not a documented quota);
-  - the "still loading" notice is based on stored state: it covers files that are listed but not yet
-    processed, not changed versions of files that are already loaded;
-  - the snapshot only grows stale; refreshing it is a manual command and a new commit;
-  - Telegram-connected startup on an empty database with the current release was not tested.
-- **Drive listings:**
-  - listing errors and unfinished pagination are detected and cause no deletions;
-  - a successful listing that silently omits files cannot be detected in general. Large drops are
-    confirmed by a second listing, but small omissions are treated as removals, and two consistent
-    listings cannot guarantee that Drive returned every file.
-- **Answer checks are heuristics.** Wording, completeness and conflict judgement come from the model and
-  vary between runs. Checks use word overlap and patterns, not semantic verification. Same-subject conflict
-  hints rely on word overlap, so differently worded conflicts rely on the prompt rules.
-- **Place routing:** a part of the forest named as the source of a suggestion («біля бобрової греблі … як
-  радять для хвойного лісу») is recognised from a fixed set of advising words and treated as a reference,
-  not as a place asked about. Other phrasings («я чув, що в хвойному лісі…») are still treated as a
-  comparison of places.
-- **Dialogue context** recognises the four seasons, current-season markers, hypothetical wording, and the
-  archive's animals in first-person statements; other phrasings may be missed.
-- **«Під вербою»'s two regions:** no priority between them was agreed. As the implementation default, the
-  equal-specificity conflict rule applies, and conflicting advice from both regions is shown with sources.
-- **Identity is conservative:** different titles mean a replacement only with an explicit update statement
-  or the uploader's confirmation.
-- **Open uploads (customer decision):** self-reported names; any user may upload, and an upload may replace
-  a matching document from any source.
-- **Groq:** limits depend on account, plan and model. The free-tier capacity we observed may not be enough
-  for sustained load.
-- **OCR** can misread scanned text.
-- **Formats and Telegram:** PDF, DOCX, TXT (plus Google Docs on Drive) only; files up to 20 MB; private
-  chats only. An upload being processed during a restart is marked `failed` and must be resent.
-- **Hosting:** the bot must run continuously; on a laptop, sleep pauses Docker and the bot.
+- **Нове встановлення:**
+  - архів доступний одразу зі знімка від 18.10.2026. Зміни, зроблені на Drive після цієї дати, надходять
+    лише після успішної синхронізації; під час збою Google чи блокування завантажень вони лишаються
+    недоступними, і бот повідомляє, що актуальність не перевірено;
+  - файли, додані чи змінені на Drive після знімка, завантажуються звичайно, тож їх усе ще може затримати
+    захист Google від завантажень (це не задокументована квота);
+  - повідомлення «ще завантажується» ґрунтується на збереженому стані: воно охоплює файли, які є в списку,
+    але ще не оброблені, а не змінені версії вже завантажених файлів;
+  - знімок лише застаріває; його оновлення — це ручна команда й новий коміт;
+  - запуск з підключенням до Telegram на порожній базі з поточною версією не перевірено.
+- **Списки файлів Drive:**
+  - помилки отримання списку й незавершена пагінація виявляються і не спричиняють видалень;
+  - успішний список, у якому мовчки бракує файлів, у загальному випадку виявити неможливо. Великі
+    зменшення підтверджуються другим отриманням списку, але дрібні пропуски вважаються видаленнями, і два
+    узгоджені списки не гарантують, що Drive повернув усі файли.
+- **Перевірки відповідей — евристики.** Формулювання, повнота й оцінка конфліктів залежать від моделі та
+  відрізняються між запусками. Перевірки спираються на збіг слів і шаблони, а не на смислову перевірку.
+  Підказки про конфлікти щодо того самого предмета спираються на збіг слів, тож для конфліктів,
+  сформульованих інакше, лишаються лише правила промпту.
+- **Маршрутизація місць:** частина лісу, названа як джерело поради («біля бобрової греблі … як радять для
+  хвойного лісу»), розпізнається за фіксованим набором слів поради й вважається посиланням, а не місцем,
+  про яке питають. Інші формулювання («я чув, що в хвойному лісі…») досі сприймаються як порівняння місць.
+- **Контекст розмови** розпізнає чотири пори року, позначки поточного сезону, гіпотетичні формулювання та
+  звірів з архіву у твердженнях від першої особи; інші формулювання можуть бути пропущені.
+- **Дві частини лісу «Під вербою»:** пріоритет між ними не погоджено. Як рішення реалізації за
+  замовчуванням діє правило конфліктів однакової конкретності: суперечливі поради обох частин
+  показуються з джерелами.
+- **Тотожність визначається обережно:** різні назви означають заміну лише за явного повідомлення про
+  оновлення або підтвердження того, хто надіслав.
+- **Відкриті завантаження (рішення замовника):** імена вказують самі користувачі; завантажувати може будь-хто,
+  і завантаження може замінити відповідний документ із будь-якого джерела.
+- **Groq:** ліміти залежать від облікового запису, тарифу й моделі. Спостережуваних можливостей
+  безкоштовного тарифу може не вистачити для тривалого навантаження.
+- **OCR** може неправильно розпізнати сканований текст.
+- **Формати й Telegram:** лише PDF, DOCX, TXT (і Google Docs на Drive); файли до 20 МБ; лише приватні
+  чати. Завантаження, що оброблялося під час перезапуску, позначається як `failed`, і його треба надіслати
+  знову.
+- **Хостинг:** бот має працювати безперервно; на ноутбуці режим сну призупиняє Docker і бота.
 
-## Project layout
+## Структура проєкту
 
 ```
 forest_bot/
-  __main__.py      entry point: run | sync | status | docs | pending | search | ask | snapshot-build
-  app.py           service wiring and startup checks
-  config.py        environment configuration
-  geography.py     mitten/region model, place detection
-  dialogue.py      dialogue context: season, identity, hypotheticals
+  __main__.py      точка входу: run | sync | status | docs | pending | search | ask | snapshot-build
+  app.py           збирання сервісів і стартові перевірки
+  config.py        налаштування зі змінних середовища
+  geography.py     модель рукавичок і частин лісу, визначення місця
+  dialogue.py      контекст розмови: сезон, хто питає, гіпотетичні питання
   extraction.py    PDF/DOCX/TXT + OCR
-  scope.py         document and passage scope; LLM scope validation
-  library.py       lifecycle: ingestion, versioning, withdrawal, removal
-  drive.py         Drive API client and synchronisation
-  snapshot.py      bundled archive snapshot: guarded import and rebuild
-  retrieval.py     geography-aware hybrid retrieval
-  embeddings.py    local fastembed model
-  textnorm.py      tokenizer and light Ukrainian stemmer
-  llm.py           Groq client (fallbacks, rate limits, time budget)
-  qa.py            routing, answer prompt, answer checks, rendering
-  timing.py        per-request latency measurement
-  conversation.py  dialogue logic (transport-independent)
-  telegram_bot.py  Telegram adapter
-  messages.py      Ukrainian texts
-  storage.py       SQLite schema and repository
-snapshot/               bundled «Лісовий архів» snapshot (manifest.json + original files)
-scripts/drive_test.sh   isolated live Drive sync checks against a test folder
-tests/                  deterministic tests + tests/live (optional)
+  scope.py         сфера застосування документів і фрагментів; перевірка відповіді LLM щодо місця
+  library.py       життєвий цикл: обробка, версії, відкликання, видалення
+  drive.py         клієнт Drive API і синхронізація
+  snapshot.py      вбудований знімок архіву: імпорт з умовами й перезбирання
+  retrieval.py     гібридний пошук з урахуванням географії
+  embeddings.py    локальна модель fastembed
+  textnorm.py      токенізатор і легкий український стемер
+  llm.py           клієнт Groq (резервні моделі, ліміти запитів, ліміт часу)
+  qa.py            маршрутизація, промпт відповіді, перевірки відповідей, форматування
+  timing.py        вимірювання затримки кожного запиту
+  conversation.py  логіка розмови (не залежить від транспорту)
+  telegram_bot.py  адаптер Telegram
+  messages.py      українські тексти
+  storage.py       схема SQLite і робота з базою
+snapshot/               вбудований знімок «Лісового архіву» (manifest.json + оригінальні файли)
+scripts/drive_test.sh   ізольовані живі перевірки синхронізації з тестовою текою Drive
+tests/                  детерміновані тести + tests/live (необов'язкові)
 docs/                   REQUIREMENTS.md, PLAN.md, VERIFICATION.md
 ```

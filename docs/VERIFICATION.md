@@ -21,7 +21,7 @@ All times are UTC.
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
   (`tests/fixtures/`); before removing them, all 78 texts and the 4 sample files were confirmed identical
   to their snapshot copies.
-- Coverage per file is listed in the README (*Testing*).
+- Coverage per file is listed in the README (*Тестування*; English version: `README.en.md`, *Testing*).
 
 ## 2. Google Drive — original archive (17 Oct 2026)
 
