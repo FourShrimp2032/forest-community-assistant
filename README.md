@@ -446,7 +446,7 @@ Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 | Version ordering across Drive and Telegram (`modifiedTime` vs receipt time) | ✅ | — offline only |
 | Questions, follow-ups, context, comparisons, missing information | ✅ (fake LLM) | ✅ real models and manual Telegram tests; **full live suite not re-run after the latest answer-check changes** |
 | Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ✅ all three passed a manual retest (ford after a further fix); replays do not establish live answer quality |
-| Fixes for the 18 Oct evening batch (false premise «40», citation, applicability) | ✅ replays of reconstructed outputs | ✅ false premise, citation and the riverside suggestion passed a manual retest; comparison: cross-region month fixed (retest passed), citation/measure/aspect fixes ⏳ pending live check |
+| Fixes for the 18 Oct evening batch (false premise «40», citation, applicability) | ✅ replays of reconstructed outputs | ✅ false premise, citation and the riverside suggestion passed a manual retest; materials comparison passed a manual retest after the citation, measure and aspect fixes |
 | Rate-limit fallback | ✅ | ✅ observed when a daily quota ran out |
 
 **Observed latency** (18 Oct, this machine and network, free-tier keys): 1.3–2.8 s per question when

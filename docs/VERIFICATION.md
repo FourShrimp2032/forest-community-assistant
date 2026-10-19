@@ -450,4 +450,9 @@ not measure alarms, real denials still are; decimal commas; aspect detection; th
 flagging «у річковій частині метод не уточнюється» only shows there is no false alarm — it does **not**
 verify that statement, which is inaccurate (the river document gives preparation and insulation steps).
 **What they cannot show:** that a live model will omit unsolicited dates or follow the aspect line; prompt
-assertions only show what the prompt contains. **Live verification pending.**
+assertions only show what the prompt contains.
+
+**Manual retest (developer, 19 Oct 2026, after deploying `c96bb24`): passed.** «Порівняй, чим утеплюють
+рукавички у хвойному лісі та біля річки»: materials, thickness, preparation, geographic scope and sources
+were correct. The answer's willow-specific addition (dry leaves) was checked by the developer against
+«Чергування в рукавичці Під вербою» and is supported.
