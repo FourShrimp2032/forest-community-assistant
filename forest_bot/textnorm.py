@@ -25,7 +25,21 @@ STOPWORDS = set(
 _TOKEN = re.compile(r"[a-zа-щьюяґєії0-9']+")
 
 
+# All case forms of a month name -> one token («жовтень», «жовтня», «жовтні», «жовтнем» -> «жовтн»), so the
+# nominative of a month and its locative match. Only exact month forms are mapped («береза» stays a tree).
+_MONTH_FORMS = re.compile(
+    r"^(?:(січ)(?:ень|ня|ні|нем)|(лют)(?:ий|ого|ому)|(берез)(?:ень|ня|ні|нем)|(квіт)(?:ень|ня|ні|нем)|"
+    r"(трав)(?:ень|ня|ні|нем)|(черв)(?:ень|ня|ні|нем)|(лип)(?:ень|ня|ні|нем)|(серп)(?:ень|ня|ні|нем)|"
+    r"(верес)(?:ень|ня|ні|нем)|(жовт)(?:ень|ня|ні|нем)|(листопад)(?:а|і|ом|у)?|(груд)(?:ень|ня|ні|нем))$")
+_MONTH_TOKENS = ["січн", "лютий", "березн", "квітн", "травн", "червн", "липн", "серпн", "вересн", "жовтн",
+                 "листопад", "грудн"]
+MONTH_TOKENS = frozenset(_MONTH_TOKENS)
+
+
 def stem(word: str) -> str:
+    m = _MONTH_FORMS.match(word)
+    if m:
+        return _MONTH_TOKENS[next(i for i, g in enumerate(m.groups()) if g)]
     if len(word) > 5 and word.endswith(("ся", "сь")):
         word = word[:-2]                      # reflexive verbs: купатися -> купати
     for ending in _ENDINGS:

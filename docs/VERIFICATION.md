@@ -14,8 +14,8 @@ All times are UTC.
 
 ## 1. Offline test suite
 
-- Latest run (18 Oct 2026, after the fixes in sections 12 and 13): 310 tests pass inside the Docker image
-  (Tesseract included); locally 309 pass and 1 is skipped (the OCR test, which needs Tesseract).
+- Latest run (19 Oct 2026, after the fixes in sections 12 and 13): 327 tests pass inside the Docker image
+  (Tesseract included); locally 326 pass and 1 is skipped (the OCR test, which needs Tesseract).
 - They run on the real archive: the bundled `snapshot/` (original files and the texts extracted from all
   78 files by this code, including OCR), a fake Drive folder, a fake LLM that records prompts, and a mocked
   HTTP layer for the real Groq and Drive clients. The snapshot replaced the earlier fixtures
@@ -411,3 +411,43 @@ October and «Біля бобрової греблі» November are both kept; a
 October repair, with the quote once. Without the scope check two of them fail, without the deduplication
 one. **Live verification pending.** Not addressed in code: months added to a materials comparison (prompt
 rules only); in a multi-place answer, a sentence about one place that does not name it is not checked.
+
+**Manual retest (developer, after deploying `be490d9`):** the cross-region October substitution is fixed;
+both regions' materials and preparation were correct. Remaining issues: in the summary «хвойний ліс —
+жовтень» cited the calendar (which says November); a redundant «У документі сказано: «Кладіть мох і суху
+хвою шаром у три лапи»» was inserted; dates were added although only materials were asked.
+
+**Diagnosis (log + offline replay).** gpt-oss-120b answered; the measure check flagged its «Метод укладання»
+item and a qwen/qwen3.8-27b correction followed (120b rate-limited); the final text is that correction plus
+post-processing. (1) **Citation repair** moved the October clause from the coniferous insulation document
+to the calendar (log: «Citation [3] … corrected to [5]»): «жовтень» and «жовтні» had different stems, so the
+coniferous document shared no word with the clause, while the calendar contains «жовтень» (for other
+activities) and the clause also named «листопадом із загального календаря». (2) The quote was inserted by
+the **measure check**: «у хвойному лісі … шар «у три лапи», у річковій частині метод не уточнюється» was read
+as denying the coniferous measure, although «не уточнюється» was about the river. (3) The **dates were
+generation**; the log does not show whether 120b's first answer or qwen's correction introduced them.
+
+**Fixes.** Month forms share one token. In citation repair a month counts for a document only if one of its
+sentences states the month together with a word of the claim's subject (the clause's own words or the
+question's); a month match, a place or a document's specificity alone is not evidence, and without such
+evidence no citation is assigned or replaced. The measure check works per claim (commas inside numbers do
+not split; a place carries over only into subordinate clauses and «там/тут»; a coordinated claim without
+a recognised place has an unknown place) and treats "not specified" as a denial only within a claim about
+the same subject and place; «річкова частина» is recognised as the river. Comparisons and follow-ups get a
+line naming every explicitly requested aspect («коли, чим і яким шаром» → time, materials, thickness;
+«чим» → materials and needed preparation; «як часто» → frequency) and asking not to add others except
+necessary conditions and exceptions; plain questions keep the completeness rules. Region scopes get a line
+that regional advice applies to all member mittens, while local advice and, for «Під вербою», the other
+region can add conditions or conflicts.
+
+**What the offline tests show** (`tests/test_scope_attribution.py`, 17): for replayed outputs,
+post-processing keeps correct citations and neither inserts nor deletes facts — the October clause keeps the
+coniferous citation, no quote is inserted, the expected materials answer has exactly the two insulation
+sources; an October insulation claim is not backed by a calendar mentioning October for other activities,
+nor by a **more specific** document mentioning October for meetings, and without subject evidence no
+citation is reassigned; place contrasts, subordinate clauses and unplaced denials in multi-place answers are
+not measure alarms, real denials still are; decimal commas; aspect detection; the prompt lines. Not
+flagging «у річковій частині метод не уточнюється» only shows there is no false alarm — it does **not**
+verify that statement, which is inaccurate (the river document gives preparation and insulation steps).
+**What they cannot show:** that a live model will omit unsolicited dates or follow the aspect line; prompt
+assertions only show what the prompt contains. **Live verification pending.**

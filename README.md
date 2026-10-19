@@ -415,6 +415,8 @@ The deterministic tests need no network or credentials. They run on the real arc
 | routing, follow-ups, dialogue context, customer scenarios | `test_qa.py`, `test_scenarios.py`, `test_dialogue.py` |
 | answer checks and citations | `test_comparisons.py`, `test_citations.py`, `test_answer_polish.py` |
 | Telegram HTML payload: entities, bold, angle brackets | `test_rendering.py` |
+| target vs cited places, same-place hints, month repair in comparisons | `test_place_reference.py` |
+| requested aspects, month citations, claim-level measure check | `test_scope_attribution.py` |
 | replays of observed answer errors (fake model outputs) | `test_answer_accuracy.py` |
 | Groq client, fallbacks, rate limits, time budget | `test_llm.py`, `test_rate_limits.py` |
 
@@ -444,7 +446,7 @@ Dated details are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 | Version ordering across Drive and Telegram (`modifiedTime` vs receipt time) | ✅ | — offline only |
 | Questions, follow-ups, context, comparisons, missing information | ✅ (fake LLM) | ✅ real models and manual Telegram tests; **full live suite not re-run after the latest answer-check changes** |
 | Fixes for the 18 Oct manual findings (ford, insulation, head/treasurer) | ✅ replays of observed outputs with a fake model | ✅ all three passed a manual retest (ford after a further fix); replays do not establish live answer quality |
-| Fixes for the 18 Oct evening batch (false premise «40», citation, applicability) | ✅ replays of reconstructed outputs | ✅ false premise, citation and the riverside suggestion passed a manual retest; month repair in comparisons fixed after a failed retest, ⏳ pending live check |
+| Fixes for the 18 Oct evening batch (false premise «40», citation, applicability) | ✅ replays of reconstructed outputs | ✅ false premise, citation and the riverside suggestion passed a manual retest; comparison: cross-region month fixed (retest passed), citation/measure/aspect fixes ⏳ pending live check |
 | Rate-limit fallback | ✅ | ✅ observed when a daily quota ran out |
 
 **Observed latency** (18 Oct, this machine and network, free-tier keys): 1.3–2.8 s per question when

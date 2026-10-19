@@ -180,7 +180,7 @@ QUERY_PATTERNS: dict[str, list[str]] = {
     "khvoinyi": [r"\bхвойн\w*"],
     "lystianyi": [r"\bлистян\w*"],
     "richka": [r"\b(біля|коло|на|до|уздовж|над|при)\s+річ(ки|ці|ку|кою)\b", r"\bрічк(а|и|у|ою)\b",
-               r"\bприбереж\w*"],
+               r"\bприбереж\w*", r"\bрічков\w*\s+частин\w*"],
 }
 
 FOREST_PATTERNS = [

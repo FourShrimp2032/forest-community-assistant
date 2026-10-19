@@ -17,7 +17,7 @@ from . import geography as geo
 from . import timing
 from .retrieval import EvidenceDoc, QueryScope, RetrievalResult, Retriever
 from .storage import Document
-from .textnorm import tokenize
+from .textnorm import MONTH_TOKENS, tokenize
 
 log = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ class QAService:
                     raw = corrected
                 raw["answer"] = apply_grounding_fallback(raw["answer"], result.docs, scope.comparison, context,
                                                          question=question)
-        rendered = render_answer(raw, result, self.tz)
+        rendered = render_answer(raw, result, self.tz, question=question)
         rendered.evidence_count = len(result.docs)
         return rendered
 
@@ -426,6 +426,27 @@ def _specificity_pairs(docs) -> list[tuple[int, int, str, str, set[str]]]:
     return pairs
 
 
+# Requested aspects, detected from question words. Used where the answer must stay within what was asked
+# (comparisons, follow-ups); a plain question keeps the completeness rules (all material details).
+_ASPECTS = [
+    ("time", r"(?<!робити,\s)(?<!діяти,\s)\bколи\b(?!\s+(?:бачиш|бачите|чуєш|чуєте|почув\w*))|до\s+якого\s+числа|"
+             r"якому\s+місяці|якого\s+місяця|\bстрок\w*|\bтермін\w*", "строк (коли)"),
+    ("material", r"\bчим\b|з\s+чого|якими?\s+матеріал\w*", "чим (матеріали) і потрібна для цього підготовка"),
+    ("thickness", r"яким\s+шаром|товщин\w*|завтовшки", "товщина шару"),
+    ("amount", r"\bскільки\b|\bрозмір\w*", "розмір і те, що його змінює (пільги, заміна)"),
+    ("frequency", r"як\s+часто|періодичн\w*", "періодичність (як часто)"),
+    ("recipient", r"\bкому\b|\bкуди\b", "кому й куди"),
+    ("who", r"\bхто\b", "хто"),
+    ("place", r"\bде\b", "де"),
+]
+
+
+def requested_aspects(question: str) -> list[tuple[str, str]]:
+    """(code, label) of every aspect the question explicitly asks about, in a fixed order."""
+    norm = geo.normalize(question)
+    return [(code, label) for code, pattern, label in _ASPECTS if re.search(pattern, norm)]
+
+
 def build_answer_messages(question: str, result: RetrievalResult, history: list[dict], tz: ZoneInfo,
                           focus: str = "", follow_up: bool = False, context: dict | None = None,
                           turn_subject: str | None = None, hypothetical: bool = False,
@@ -478,6 +499,29 @@ def build_answer_messages(question: str, result: RetrievalResult, history: list[
                   for i, j, snippet in same_subject_pairs(result)]
     if pair_lines:
         coverage_lines += pair_lines
+    aspects = requested_aspects(focus or question) if (scope.comparison or follow_up) else []
+    if aspects:
+        asked = {c for c, _ in aspects}
+        not_asked = [label for code, _, label in _ASPECTS if code not in asked and code in ("time", "amount",
+                                                                                          "recipient")]
+        coverage_lines.append(
+            f"- Запитані аспекти: {'; '.join(label for _, label in aspects)}. Дай КОЖЕН із них із джерелом. "
+            + (f"Не додавай того, про що не питали ({'; '.join(not_asked)}), " if not_asked else "")
+            + "крім умов і винятків, без яких запитане вводить в оману.")
+    if scope.kind == "regions":
+        for r in scope.regions:
+            members = geo.mittens_in_region(r)
+            overlapping = [m for m in members if len(geo.regions_of(m)) > 1]
+            line = (f"- Поради частини лісу «{geo.REGIONS[r]}» діють для всіх її рукавичок "
+                    f"({', '.join(f'«{geo.MITTENS[m]}»' for m in members)}). Місцеві поради окремої рукавички")
+            if overlapping:
+                others = ", ".join(f"«{geo.MITTENS[m]}» належить також до "
+                                   + " і ".join(f"«{geo.REGIONS[x]}»" for x in geo.regions_of(m) if x != r)
+                                   for m in overlapping)
+                line += f" та поради іншої її частини лісу ({others})"
+            line += (" можуть додавати умови або розходитися з порадою частини лісу, тож не подавай пораду частини "
+                     "лісу як вичерпну для кожної рукавички.")
+            coverage_lines.append(line)
     for r in reference_regions or []:
         targets = ", ".join(f"«{geo.MITTENS[m]}»" for m in scope.mittens)
         coverage_lines.append(
@@ -521,7 +565,7 @@ class AnswerResult:
 _CITATION = re.compile(r"\[(\d{1,2})\]")
 
 
-def render_answer(raw: dict | None, result: RetrievalResult, tz: ZoneInfo) -> AnswerResult:
+def render_answer(raw: dict | None, result: RetrievalResult, tz: ZoneInfo, question: str = "") -> AnswerResult:
     if not isinstance(raw, dict) or not str(raw.get("answer") or "").strip():
         raise ValueError("LLM returned no answer")
     status = raw.get("status") if raw.get("status") in ("answered", "not_found", "clarify") else "answered"
@@ -540,7 +584,7 @@ def render_answer(raw: dict | None, result: RetrievalResult, tz: ZoneInfo) -> An
     # Drop citation markers that do not correspond to a provided document.
     text = _CITATION.sub(lambda m: m.group(0) if 1 <= int(m.group(1)) <= n_docs else "", text)
     # Every citation must support its own claim; otherwise move it to a supporting document or drop it.
-    text = verify_citations(text, result.docs)
+    text = verify_citations(text, result.docs, question=question)
     cited = []
     for m in _CITATION.finditer(text):
         n = int(m.group(1))
@@ -587,7 +631,28 @@ _WEAK_ATTRIBUTION = set(tokenize(
     "тоді потім після перед коли якщо поки доки"))
 
 
-def verify_citations(text: str, docs: list[EvidenceDoc]) -> str:
+def _backed_tokens(clause_tokens: set[str], subject: set[str], docs, all_tokens: list[set[str]],
+                   sentences: list[list[set[str]]]) -> tuple[list[set[str]], list[set[str]]]:
+    """Per document, the clause words it can vouch for. A month alone is never proof, nor is a place or a
+    document's specificity: a month counts for a document only if one of its sentences states the month
+    together with a word of the claim's subject (the clause's own words, or the question's for a terse
+    clause like «хвойний ліс — жовтень»). «Жолуді збирають у жовтні» or «Збори — у жовтні» never back
+    «утеплюють у жовтні». Without such evidence no document backs the month, so nothing is reassigned.
+    Also returns, per document, those backed months: month + subject word in one sentence is itself a
+    two-word match."""
+    months = clause_tokens & MONTH_TOKENS
+    strong: list[set[str]] = [set() for _ in docs]
+    if not months:
+        return all_tokens, strong
+    subject = subject - MONTH_TOKENS
+    for m in months:
+        for k in range(len(docs)):
+            if any(m in st and st & subject for st in sentences[k]):
+                strong[k].add(m)
+    return [(all_tokens[k] - MONTH_TOKENS) | strong[k] for k in range(len(docs))], strong
+
+
+def verify_citations(text: str, docs: list[EvidenceDoc], question: str = "") -> str:
     """Make every citation back the facts of ITS OWN clause.
 
     For each group of citation markers («[1]», «[1][2]») the clause is the text since the previous group.
@@ -599,9 +664,9 @@ def verify_citations(text: str, docs: list[EvidenceDoc]) -> str:
     """
     if not docs:
         return text
-    doc_tokens = [_content_tokens(f"{d.document.title}\n{d.text}") for d in docs]
-    in_all = set.intersection(*doc_tokens) if len(doc_tokens) > 1 else set()
-    in_any = set.union(*doc_tokens)
+    all_tokens = [_content_tokens(f"{d.document.title}\n{d.text}") for d in docs]
+    doc_sentences = [[_content_tokens(s) for s in _sentences_of(d.text)] for d in docs]
+    question_tokens = _content_tokens(question) - MONTH_TOKENS
     group_re = re.compile(r"(?:\[\d{1,2}\]\s*)+")
     out_lines = []
     for line in text.split("\n"):
@@ -614,7 +679,10 @@ def verify_citations(text: str, docs: list[EvidenceDoc]) -> str:
                 clause_tokens = _content_tokens(line[:m.start()][sentence_start + 1:] if sentence_start >= 0
                                                 else line[:m.start()])
             cited = [int(n) for n in re.findall(r"\d{1,2}", m.group(0)) if 1 <= int(n) <= len(docs)]
-            distinctive = (clause_tokens & in_any) - in_all
+            doc_tokens, strong = _backed_tokens(clause_tokens, clause_tokens | question_tokens, docs, all_tokens,
+                                                doc_sentences)
+            in_all = set.intersection(*doc_tokens) if len(doc_tokens) > 1 else set()
+            distinctive = (clause_tokens & set.union(*doc_tokens)) - in_all
             group = cited
             if distinctive and cited:
                 keep = [n for n in cited if doc_tokens[n - 1] & distinctive]
@@ -622,11 +690,14 @@ def verify_citations(text: str, docs: list[EvidenceDoc]) -> str:
                 missing = distinctive - covered
                 added = []
                 while missing:
+                    def score(n):
+                        return len((doc_tokens[n - 1] & missing) - _WEAK_ATTRIBUTION) + len(strong[n - 1] & missing)
+
                     best = max((n for n in range(1, len(docs) + 1) if n not in keep and n not in added),
-                               key=lambda n: len(doc_tokens[n - 1] & missing), default=None)
+                               key=score, default=None)
                     # One coincidental word is not a fact from another document; require two content words
                     # («потрібно», «тих» are not facts: they added the insulation document to a fee clause).
-                    if best is None or len((doc_tokens[best - 1] & missing) - _WEAK_ATTRIBUTION) < 2:
+                    if best is None or score(best) < 2:
                         break
                     added.append(best)
                     missing -= doc_tokens[best - 1]
@@ -851,9 +922,11 @@ def _measure_issues(answer_sentences: list[str], docs) -> list[tuple[str, str, s
     source = [(n, s, _measures(s), _content_tokens(s)) for n, d in enumerate(docs, start=1)
               for s in _sentences_of(d.text)]
     stated = [(v, u) for _, _, ms, _ in source for v, u in ms]
+    targets = {t for d in docs for t in (getattr(d, "levels", None) or {}) if t}
     issues = []
     for sentence in answer_sentences:
-        seg, found, norm = _content_tokens(sentence), _measures(sentence), geo.normalize(sentence)
+        seg, found = _content_tokens(sentence), _measures(sentence)
+        claims = _claims(sentence)
         for n, src, src_measures, src_tokens in source:
             if not src_measures or not {t for t in seg & src_tokens if len(t) >= 3 and not t[0].isdigit()}:
                 continue                                    # not the same topic
@@ -861,8 +934,15 @@ def _measure_issues(answer_sentences: list[str], docs) -> list[tuple[str, str, s
             # (derived values of a known unit, e.g. «1 шишка» from «вдвічі менші», are checked elsewhere).
             changed = any(any(v == value for v, _ in src_measures)
                           and not any(units & u for _, u in stated) for value, units in found)
-            denied = _NOT_STATED.search(norm) and any(v == value and units & u for value, units in found
-                                                      for v, u in src_measures)
+            doc = docs[n - 1]
+            doc_places = _with_regions({t for t in (getattr(doc, "levels", None) or {}) if t})
+            doc_tokens = _content_tokens(doc.text)
+            # «… не уточнюється» denies THIS measure only if that claim is about the same subject and place:
+            # «у хвойному лісі шар у три лапи, а біля річки метод не уточнюється» is a contrast, not a denial.
+            denied = any(v == value and units & u for value, units in found for v, u in src_measures) and any(
+                _NOT_STATED.search(geo.normalize(text)) and _content_tokens(text) & doc_tokens
+                and _claim_place_matches(places, doc_places, targets)
+                for text, places in claims)
             if changed:
                 issues.append(("measure", sentence, f"міру змінено: у джерелі [{n}] — «{src.strip()}»; "
                                                     f"передай її дослівно, не як інші одиниці чи кількість"))
@@ -872,6 +952,45 @@ def _measure_issues(answer_sentences: list[str], docs) -> list[tuple[str, str, s
                                                     f"не пиши, що її не вказано"))
                 break
     return issues
+
+
+_CLAIM_BREAK = re.compile(r"(?<!\d),|,(?!\d)|;|—|–|:\s|\(|\)|\s(?:а|але|однак|проте|тоді\s+як|натомість|хоча)\s")
+
+
+def _claims(sentence: str) -> list[tuple[str, set[str]]]:
+    """A sentence split into claims, each with the places it is about. Commas inside numbers («1,5») do not
+    split. A place carries over only into subordinate clauses and their continuation («біля річки, де мох
+    гниє, товщину не вказано» is about the river throughout); a new coordinated claim («…, а у річковій
+    частині …») with no recognised place has an unknown place (empty), never the previous claim's place."""
+    out, current, subordinate = [], set(), False
+    for part in _CLAIM_BREAK.split(_CITATION.sub(" ", sentence)):
+        if not part or not part.strip():
+            continue
+        named = _places_named(part)
+        if named:
+            current = named
+        elif _SUBORDINATE.match(part):
+            subordinate = True               # «де мох гниє»: still about the current place
+        elif re.search(r"\b(?:там|тут|туди|звідти)\b", part, re.I):
+            pass                             # «… але товщину там не вказано»: the place just named
+        elif not subordinate:
+            current = set()                  # a new claim of its own: place unknown
+        else:
+            subordinate = False              # main clause resumed after a subordinate one
+        out.append((part, set(current)))
+    return out
+
+
+_SUBORDINATE = re.compile(r"^\W*(?:де|куди|звідки|який|яка|яке|які|якого|якої|яким|якій|що|коли|поки|доки|бо|"
+                          r"щоб|якщо|адже|тобто)\b", re.I)
+
+
+def _claim_place_matches(claim_places: set[str], doc_places: set[str], targets: set[str]) -> bool:
+    """Is the claim about the place the measure's document applies to? A claim naming another place is not;
+    an unplaced claim counts only when the answer is about a single place (otherwise its place is unknown)."""
+    if claim_places:
+        return bool(claim_places & doc_places) and not (claim_places - doc_places)
+    return len(targets) <= 1
 
 
 def _distinction_issues(answer_sentences: list[str], evidence_norm: str) -> list[tuple[str, str, str]]:
